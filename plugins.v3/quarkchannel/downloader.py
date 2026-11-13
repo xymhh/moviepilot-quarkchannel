@@ -17,7 +17,7 @@ from typing import Callable, Optional
 from app.sdk.logging import logger
 from app.sdk.network import RequestUtils
 
-from .shares.quark import QuarkShareClient, ShareFile
+from .shares.quark import QuarkShareClient, ShareFile, extract_pwd_id
 
 CHUNK_SIZE = 16 * 1024 * 1024
 STATE_DOWNLOADING = "downloading"
@@ -239,7 +239,7 @@ class DownloadManager:
             logger.warning(f"删除任务内容失败：{error}")
 
     def _run(self, task_hash: str) -> None:
-        """在 worker 线程中顺序下载各文件。"""
+        """在 worker 线程中顺序下载各文件，整任务只转存一次。"""
         task = self.get(task_hash)
         event = self._stops.get(task_hash)
         share_url = self._share_urls.get(task_hash, "")
@@ -248,20 +248,73 @@ class DownloadManager:
             return
         client = self._client_factory()
         root = Path(task.content_path)
+        saved_fids: list[str] = []
         try:
             root.mkdir(parents=True, exist_ok=True)
+            pending: list[TaskFile] = []
+            for item in task.files:
+                if item.done >= item.size > 0:
+                    continue
+                destination = root / item.rel_path
+                if destination.exists() and destination.stat().st_size == item.size:
+                    item.done = item.size
+                    continue
+                pending.append(item)
+            saved_map: dict[int, str] = {}
+            if pending and not event.is_set():
+                if not share_url:
+                    raise ValueError("缺少分享地址，无法取链")
+                pwd_id = extract_pwd_id(share_url)
+                if not pwd_id:
+                    raise ValueError("无法从分享地址解析分享 id")
+                stoken = client.stoken(pwd_id, passcode)
+                if not stoken:
+                    raise ValueError("分享不可用，无法转存取链")
+                # 分享文件的 share_fid_token 有时效，转存前必须重新拉一次 detail，
+                # 否则会命中 41020「转存文件token校验异常」。
+                fresh_tokens: dict[str, str] = {}
+                try:
+                    # 必须复用同一个 stoken：detail 返回的 share_fid_token 与 stoken 绑定，
+                    # 换一次 stoken 后再转存会报 41020 token 校验异常。
+                    snapshot = client.snapshot(share_url, passcode, token=stoken)
+                    fresh_tokens = {entry.fid: entry.share_token for entry in snapshot.files}
+                except Exception as error:  # noqa: BLE001 - 拉取失败时退回缓存 token
+                    logger.warning(f"刷新分享文件 token 失败，改用缓存值：{error}")
+                transfer_files = [
+                    ShareFile(
+                        fid=item.fid,
+                        name=item.name,
+                        size=item.size,
+                        share_token=fresh_tokens.get(item.fid) or item.share_token,
+                    )
+                    for item in pending
+                ]
+                saved = client.save_files(pwd_id, stoken, transfer_files)
+                if len(saved) != len(pending):
+                    raise ValueError(
+                        f"转存文件数量不一致：{len(saved)}/{len(pending)}"
+                    )
+                saved_fids = list(saved)
+                saved_map = {id(item): fid for item, fid in zip(pending, saved)}
             for item in task.files:
                 if event.is_set():
                     return
                 if item.done >= item.size > 0:
                     continue
-                self._download_one(task, event, client, share_url, passcode, item)
+                self._download_one(
+                    task, event, client, share_url, passcode, item, saved_map.get(id(item)),
+                )
             with self._lock:
                 task.done = sum(item.done for item in task.files)
                 task.state = STATE_COMPLETED
                 task.speed = 0.0
                 task.updated_at = time.time()
                 self._flush()
+            if saved_fids and not bool(getattr(client, "keep_saved", False)):
+                try:
+                    client.delete_files(saved_fids)
+                except Exception as error:  # noqa: BLE001 - 清理失败不改变下载结果
+                    logger.warning(f"删除网盘副本失败：{error}")
             logger.info(f"网盘直链下载完成：{task.title} → {task.content_path}")
         except Exception as error:  # noqa: BLE001 - 单任务失败不影响其它任务
             logger.error(f"网盘直链下载失败：{task.title}，{error}")
@@ -273,14 +326,18 @@ class DownloadManager:
                 self._flush()
 
     def _download_one(self, task: DownloadTask, event: threading.Event, client: QuarkShareClient,
-                      share_url: str, passcode: str, item: TaskFile) -> None:
-        """下载单个文件（分片并行 + 断点续传）。"""
-        if not share_url:
-            raise ValueError("缺少分享地址，无法取链")
-        share_file = ShareFile(
-            fid=item.fid, name=item.name, size=item.size, share_token=item.share_token,
-        )
-        url, headers = client.download_url(share_url, passcode, share_file)
+                      share_url: str, passcode: str, item: TaskFile,
+                      saved_fid: Optional[str] = None) -> None:
+        """下载单个文件（分片并行 + 断点续传），优先使用任务级转存 fid。"""
+        if saved_fid:
+            url, headers = client.download_url_by_fid(saved_fid)
+        else:
+            if not share_url:
+                raise ValueError("缺少分享地址，无法取链")
+            share_file = ShareFile(
+                fid=item.fid, name=item.name, size=item.size, share_token=item.share_token,
+            )
+            url, headers = client.download_url(share_url, passcode, share_file)
         destination = Path(task.content_path) / item.rel_path
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists() and destination.stat().st_size == item.size:
@@ -312,7 +369,8 @@ class DownloadManager:
                 timeout=120,
             )
             if response is None or response.status_code not in (200, 206):
-                raise RuntimeError(f"分片下载失败：{start}-{end}")
+                status = getattr(response, "status_code", "无响应")
+                raise RuntimeError(f"分片下载失败：{start}-{end}，HTTP {status}")
             payload = response.content or b""
             if response.status_code == 200 and start > 0:
                 raise RuntimeError("服务器不支持分段下载")

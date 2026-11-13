@@ -340,6 +340,14 @@ class QuarkChannel(_PluginBase):
                         ],
                     },
                     {
+                        "component": "VSwitch",
+                        "props": {
+                            "model": "keep_saved",
+                            "label": "下载后保留网盘副本",
+                            "hint": "关闭时下载成功后清理转存副本，失败时保留便于重试",
+                        },
+                    },
+                    {
                         "component": "VTextField",
                         "props": {
                             "model": "keyword_whitelist",
@@ -360,6 +368,7 @@ class QuarkChannel(_PluginBase):
             "mp_base_url": "http://127.0.0.1:3000",
             "quark_cookie": "",
             "download_root": "/downloads",
+            "keep_saved": False,
             "downloader_name": "网盘直链",
             "keyword_whitelist": "",
         }
@@ -457,6 +466,11 @@ class QuarkChannel(_PluginBase):
         if not task_hash:
             task_hash = hashlib.md5(str(content).encode("utf-8")).hexdigest()
         save_dir = self._resolve_download_dir(download_dir)
+        if save_dir is None:
+            return None, None, None, (
+                "MoviePilot 的下载目录配置在远程存储上，直链频道只能落到本地目录；"
+                "请在下载目录中增加本地目录（如 /downloads）并为该资源指定保存路径"
+            )
         task = DownloadTask(
             hash=task_hash,
             sid=sid,
@@ -728,21 +742,28 @@ class QuarkChannel(_PluginBase):
             logger.warning(f"登记下载器条目失败：{error}")
 
     def _make_client(self) -> QuarkShareClient:
-        """创建取链客户端。"""
-        return QuarkShareClient(str(self._config.get("quark_cookie") or ""))
+        """创建取链客户端，并传入副本保留策略。"""
+        return QuarkShareClient(
+            str(self._config.get("quark_cookie") or ""),
+            keep_saved=bool(self._config.get("keep_saved")),
+        )
 
     def _download_root(self) -> str:
         """下载根目录。"""
         return str(self._config.get("download_root") or "/downloads")
 
-    def _resolve_download_dir(self, download_dir: Any) -> Path:
-        """把 MoviePilot 的下载目录转换为本地路径。"""
+    def _resolve_download_dir(self, download_dir: Any) -> Optional[Path]:
+        """把 MoviePilot 的下载目录转换为本地路径；远程存储返回 None。
+
+        :param download_dir: MoviePilot 传入的下载目录（可能带存储前缀）
+        :return: 本地路径；下载目录为远程存储时返回 None
+        """
         text = str(download_dir or "")
         if text.startswith("local:"):
             return Path(text[len("local:"):])
         if text.startswith(STORAGE_PREFIX):
-            logger.warning(f"直链频道只支持本地存储，改用下载根目录：{text}")
-            return Path(self._download_root())
+            logger.warning(f"直链频道不支持远程存储下载目录：{text}")
+            return None
         if text.startswith("/"):
             return Path(text)
         return Path(self._download_root())
