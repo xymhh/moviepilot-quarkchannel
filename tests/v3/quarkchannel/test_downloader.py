@@ -437,7 +437,9 @@ def test_aria2_success_updates_progress_and_cleans_saved(tmp_path, monkeypatch):
             assert options["min-split-size"] == "1M"
             assert options["continue"] == "true"
             assert options["auto-file-renaming"] == "false"
-            assert "User-Agent: test" in options["header"]
+            assert options.get("user-agent") == "test"
+            assert all("User-Agent" not in line for line in options["header"])
+            assert all("Referer" not in line for line in options["header"])
         assert sorted(rpc.counts.values()) == [3, 3]
         assert client.save_calls and len(client.save_calls[0][2]) == 2
         assert client.delete_calls == [["saved-fid-0", "saved-fid-1"]]
@@ -505,5 +507,27 @@ def test_aria2_error_marks_task_error(tmp_path, monkeypatch):
         assert "aria2 下载失败" in finished.error
         assert len(finished.error) <= 200
         assert rpc.removed == ["gid-1"]
+    finally:
+        manager.shutdown()
+
+
+def test_aria2_http_rejection_falls_back(tmp_path, monkeypatch):
+    """aria2 被夸克以 403/412 拒绝时回落到自研分片，而不是判任务失败。"""
+    monkeypatch.setattr(downloader_module, "ARIA2_POLL_INTERVAL", 0.0)
+    source = b"abcdefghij"
+    calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(downloader_module, "CHUNK_SIZE", 4)
+    monkeypatch.setattr(downloader_module, "RequestUtils", _range_utils(source, calls))
+    client = _Client()
+    rpc = _FakeAria2Rpc(mode="error", error_message="The response status is not successful. status=403")
+    launcher = _FakeLauncher(rpc)
+    manager = DownloadManager(tmp_path, lambda: client, aria2_launcher=launcher)
+    task = _task(tmp_path, size=len(source))
+    try:
+        manager.submit(task, "https://pan.quark.cn/s/abc", "")
+        finished = _wait(manager, task.hash, {STATE_COMPLETED, STATE_ERROR})
+        assert finished.state == STATE_COMPLETED
+        assert (Path(task.content_path) / "a.bin").read_bytes() == source
+        assert sorted(calls) == [(0, 3), (4, 7), (8, 9)]
     finally:
         manager.shutdown()

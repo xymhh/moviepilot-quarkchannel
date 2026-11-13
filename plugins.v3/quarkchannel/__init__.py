@@ -178,6 +178,13 @@ class QuarkChannel(_PluginBase):
                 "summary": "查看任务与缓存状态",
             },
             {
+                "path": "/linkdiag",
+                "endpoint": self.api_linkdiag,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "取链后对比 python 与 aria2 的下载响应（排障用）",
+            },
+            {
                 "path": "/selftest",
                 "endpoint": self.api_selftest,
                 "methods": ["POST"],
@@ -734,6 +741,48 @@ class QuarkChannel(_PluginBase):
                 ],
             },
         }
+
+    def api_linkdiag(self, payload: Optional[dict] = None) -> dict:
+        """对比同一夸克直链在 python 与 aria2 下的响应状态。
+
+        :param payload: {"share_url": "...", "passcode": "", "file_index": 0}
+        :return: 两步结果
+        """
+        payload = payload or {}
+        share_url = str(payload.get("share_url") or "").strip()
+        passcode = str(payload.get("passcode") or "").strip()
+        index = int(payload.get("file_index") or 0)
+        client = self._make_client()
+        pwd_id = extract_pwd_id(share_url)
+        token = client.stoken(pwd_id, passcode)
+        if not token:
+            return {"success": False, "message": "分享不可用"}
+        snapshot = client.snapshot(share_url, passcode, token=token)
+        if not snapshot.files:
+            return {"success": False, "message": "分享内没有文件"}
+        target = snapshot.files[min(index, len(snapshot.files) - 1)]
+        saved = client.save_files(pwd_id, token, [target])
+        if not saved:
+            return {"success": False, "message": "转存失败"}
+        try:
+            url, headers = client.download_url_by_fid(saved[0])
+            from app.sdk.network import RequestUtils as _Req
+            probe = _Req().get_res(url, headers={**headers, "Range": "bytes=0-1023"}, timeout=30)
+            python_status = getattr(probe, "status_code", None)
+            body = getattr(probe, "content", b"") or b""
+            try:
+                body_text = body.decode("utf-8", "ignore")[:200]
+            except Exception:  # noqa: BLE001 - 排障输出不允许中断
+                body_text = ""
+            result = {
+                "success": True,
+                "python": {"status": python_status, "bytes": len(body), "body": body_text},
+                "headers": sorted(headers.keys()),
+                "file": {"name": target.name, "size": target.size},
+            }
+        finally:
+            client.delete_files(saved)
+        return result
 
     def api_selftest(self, payload: Optional[dict] = None) -> dict:
         """按真实链路自检一条分享：快照 → 转存 → 取链，不下正文。

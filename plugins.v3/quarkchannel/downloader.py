@@ -365,10 +365,15 @@ class DownloadManager:
     def _aria2_options(self, task: DownloadTask, item: TaskFile,
                        headers: dict) -> dict:
         """构造 aria2.addUri 需要的下载选项。"""
+        headers = headers or {}
+        # UA/Referer 用 aria2 原生选项下发：放进 header 会与 aria2 自带 UA 冲突，
+        # 夸克 CDN 会直接返回 412。
         header_list = [
-            f"{key}: {value}" for key, value in (headers or {}).items() if value
+            f"{key}: {value}"
+            for key, value in headers.items()
+            if value and key.lower() not in {"user-agent", "referer"}
         ]
-        return {
+        options = {
             "dir": task.content_path,
             "out": item.rel_path,
             "header": header_list,
@@ -378,6 +383,11 @@ class DownloadManager:
             "continue": "true",
             "auto-file-renaming": "false",
         }
+        if headers.get("User-Agent"):
+            options["user-agent"] = headers["User-Agent"]
+        if headers.get("Referer"):
+            options["referer"] = headers["Referer"]
+        return options
 
     def _remove_aria2_gids(self, gids: list[str]) -> None:
         """尽力从 aria2 移除 gid，不向调用方抛异常。"""
@@ -495,6 +505,12 @@ class DownloadManager:
                 self._discard_aria2_partials(task, records)
                 with self._lock:
                     self._aria2_gids.pop(task.hash, None)
+                # 夸克 CDN 对 aria2 的请求特征较严（403/412），这类拒绝改用自研分片，
+                # 避免把本可下载的资源判失败。
+                if any(code in aria2_error for code in ("status=401", "status=403",
+                                                        "status=404", "status=412")):
+                    logger.warning(f"aria2 请求被夸克拒绝（{aria2_error}），回落到自研分片下载")
+                    return "fallback"
                 raise RuntimeError(f"aria2 下载失败：{aria2_error}"[:200])
             with self._lock:
                 task.done = min(task.total, total_done) if task.total else total_done
