@@ -11,10 +11,14 @@ from __future__ import annotations
 import hashlib
 import re
 import secrets
+import threading
 import time
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional, Union
+from urllib.parse import quote
 
 from fastapi.responses import Response
 
@@ -64,6 +68,12 @@ EPISODE_PATTERNS = (
     re.compile(r"(?<![\dA-Za-z])(\d{1,4})\s*[-~]\s*\d{1,4}(?![\dA-Za-z])"),
 )
 STORAGE_PREFIX = ("u115:", "alipan:", "rclone:", "alist:", "alistgo:", "smb:")
+SEASON_EPISODE_RE = re.compile(r"[Ss](\d{1,2})[._ ]?[Ee](\d{1,4})")
+MAX_EXPAND_FILES = 30
+PENDING_SHARE_LIMIT = 500
+PREWARM_COUNT = 2
+PREWARM_DELAY_SECONDS = 0.2
+SNAPSHOT_TIMEOUT_SECONDS = 8.0
 
 
 class QuarkChannel(_PluginBase):
@@ -72,7 +82,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.6.4"
+    plugin_version = "0.7.0"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -89,6 +99,15 @@ class QuarkChannel(_PluginBase):
     _secret: str = ""
     _aria2_secret: str = ""
 
+    def __init__(self) -> None:
+        """初始化进程内候选登记表与后台预热队列。"""
+        super().__init__()
+        self._pending_shares: OrderedDict[str, dict] = OrderedDict()
+        self._pending_lock = threading.RLock()
+        self._prewarm_pool: Optional[ThreadPoolExecutor] = None
+        self._prewarm_lock = threading.Lock()
+        self._prewarm_inflight: set[str] = set()
+
     # ---------- 生命周期 ----------
 
     def init_plugin(self, config: Optional[dict] = None) -> None:
@@ -97,6 +116,9 @@ class QuarkChannel(_PluginBase):
         self._enabled = bool(config.get("enabled"))
         self._config = config
         data_dir = self.get_data_path()
+        self._stop_prewarm()
+        with self._pending_lock:
+            self._pending_shares.clear()
         self._cache = TorrentCache(data_dir)
         self._stop_tg_monitor()
         self._tg_index = TgIndex(data_dir)
@@ -194,12 +216,22 @@ class QuarkChannel(_PluginBase):
         return self._enabled
 
     def stop_service(self) -> None:
-        """停止 Telegram 监控、下载线程并释放资源。"""
+        """停止 Telegram 监控、预热队列与下载线程并释放资源。"""
+        self._stop_prewarm()
         self._stop_tg_monitor()
         if self._manager:
             self._manager.shutdown()
         self._manager = None
         self._enabled = False
+
+    def _stop_prewarm(self) -> None:
+        """停止后台预热线程池，不等待正在执行的快照。"""
+        with self._prewarm_lock:
+            pool = self._prewarm_pool
+            self._prewarm_pool = None
+            self._prewarm_inflight.clear()
+        if pool:
+            pool.shutdown(wait=False, cancel_futures=True)
 
     def _stop_tg_monitor(self) -> None:
         """停止并释放 Telegram 监控线程。"""
@@ -528,14 +560,15 @@ class QuarkChannel(_PluginBase):
     def search_torrents(self, site: Optional[dict] = None, keyword: Optional[str] = None,
                         mtype: Optional[MediaType] = None, cat: Optional[str] = None,
                         page: int = 0) -> list[TorrentInfo]:
-        """优先查 Telegram 增量索引，再合并 pansou 结果并返回种子资源。"""
+        """优先查 Telegram 索引，再合并 pansou；搜索阶段不再同步取快照。"""
+        started = time.time()
         if not self._enabled or not keyword or page:
             return []
         if not self._keyword_allowed(keyword):
             logger.debug(f"直链频道跳过关键词：{keyword}")
             return []
         limit = max(1, min(int(self._config.get("max_results") or 3), 10))
-        results: list[TorrentInfo] = []
+        candidates: list[dict] = []
         seen: set[str] = set()
         if self._tg_index:
             try:
@@ -544,79 +577,249 @@ class QuarkChannel(_PluginBase):
                 logger.warning(f"读取 Telegram 索引失败：{type(error).__name__}")
                 tg_items = []
             for item in tg_items:
-                if len(results) >= limit:
+                if len(candidates) >= limit:
                     break
                 if not isinstance(item, dict):
                     continue
                 url = str(item.get("share_url") or item.get("url") or "").strip()
                 if not url:
                     continue
-                sid = str(item.get("sid") or "").strip()
-                if not sid:
-                    sid = build_sid(normalize_share_url(url) or url)
+                normalized = normalize_share_url(url) or url
+                sid = build_sid(normalized)
                 if sid in seen:
                     continue
-                entry = self._ensure_search_entry(
-                    url, str(item.get("passcode") or ""), str(item.get("title") or ""),
-                )
-                if not entry or entry.sid in seen:
-                    continue
                 seen.add(sid)
-                seen.add(entry.sid)
-                results.append(self._torrent_from_entry(
-                    entry, str(item.get("channel") or "telegram"), 10, mtype,
-                ))
-        if self._pansou and self._pansou.ready and len(results) < limit:
-            candidates = self._pansou.search(keyword, limit=limit * 2)
-            for item in candidates:
-                if len(results) >= limit:
+                candidate = self._make_candidate(
+                    sid, normalized, str(item.get("passcode") or ""),
+                    str(item.get("title") or ""), str(item.get("channel") or "telegram"),
+                    10, 10, item.get("size"),
+                )
+                item_sid = str(item.get("sid") or "").strip()
+                if item_sid and item_sid != sid:
+                    candidate["lookup_sids"] = [item_sid]
+                candidates.append(candidate)
+        if self._pansou and self._pansou.ready and len(candidates) < limit:
+            for item in self._pansou.search(keyword, limit=limit * 2):
+                if len(candidates) >= limit:
                     break
                 if not isinstance(item, dict):
                     continue
                 url = str(item.get("url") or item.get("share_url") or "").strip()
                 if not url:
                     continue
-                candidate_sid = build_sid(normalize_share_url(url) or url)
-                if candidate_sid in seen:
+                normalized = normalize_share_url(url) or url
+                sid = build_sid(normalized)
+                if sid in seen:
                     continue
-                entry = self._ensure_search_entry(
-                    url, str(item.get("passcode") or ""), str(item.get("title") or ""),
+                seen.add(sid)
+                candidate = self._make_candidate(
+                    sid, normalized, str(item.get("passcode") or ""),
+                    str(item.get("title") or ""), str(item.get("source") or "pansou"),
+                    0, 5, item.get("size"),
                 )
-                if not entry or entry.sid in seen:
-                    continue
-                seen.add(candidate_sid)
-                seen.add(entry.sid)
-                results.append(self._torrent_from_entry(
-                    entry, str(item.get("source") or "pansou"), 0, mtype,
-                ))
-        logger.info(f"直链频道为「{keyword}」提供 {len(results)} 条资源")
+                item_sid = str(item.get("sid") or "").strip()
+                if item_sid and item_sid != sid:
+                    candidate["lookup_sids"] = [item_sid]
+                candidates.append(candidate)
+        results: list[TorrentInfo] = []
+        for candidate in candidates:
+            results.extend(self._results_for_candidate(candidate, mtype))
+        missing = [item for item in candidates if not self._cached_entry(item["sid"])]
+        self._submit_prewarm(missing[:PREWARM_COUNT])
+        logger.info(
+            f"直链频道为「{keyword}」返回 {len(results)} 条资源，"
+            f"候选 {len(candidates)} 个（缓存预热 {min(len(missing), PREWARM_COUNT)} 个），"
+            f"耗时 {time.time() - started:.2f}s"
+        )
         return results
 
-    def _ensure_search_entry(self, share_url: str, passcode: str,
-                             title: str) -> Optional[ShareEntry]:
-        """搜索链获取快照；单条异常只跳过该条，不阻断后续来源。"""
+    @staticmethod
+    def _size_of(value: Any) -> int:
+        """把候选大小安全转换为字节数。"""
         try:
-            return self._ensure_entry(share_url, passcode, title)
-        except Exception as error:  # noqa: BLE001 - 单条失败不影响其它候选
-            logger.warning(f"读取分享快照失败：{share_url}，{type(error).__name__}")
+            return max(0, int(float(str(value).replace(",", ""))))
+        except (TypeError, ValueError):
+            return 0
+
+    def _make_candidate(self, sid: str, share_url: str, passcode: str, title: str,
+                        site_name: str, pri_order: int, expand_pri: int,
+                        size: Any) -> dict:
+        """登记一个搜索结果候选，供后续展开与懒加载。"""
+        candidate = {
+            "sid": sid,
+            "share_url": share_url,
+            "passcode": passcode,
+            "title": title.strip() or share_url,
+            "site_name": site_name or "pansou",
+            "pri_order": int(pri_order),
+            "expand_pri": int(expand_pri),
+            "size": self._size_of(size),
+        }
+        self._remember_pending(candidate)
+        return candidate
+
+    def _remember_pending(self, candidate: dict) -> None:
+        """记住 sid 对应的分享地址，供 /torrent 无快照时现场取清单。"""
+        with self._pending_lock:
+            sid = str(candidate.get("sid") or "")
+            if not sid:
+                return
+            self._pending_shares[sid] = {
+                "share_url": str(candidate.get("share_url") or ""),
+                "passcode": str(candidate.get("passcode") or ""),
+                "title": str(candidate.get("title") or ""),
+            }
+            self._pending_shares.move_to_end(sid)
+            while len(self._pending_shares) > PENDING_SHARE_LIMIT:
+                self._pending_shares.popitem(last=False)
+
+    def _pending_info(self, sid: str) -> Optional[dict]:
+        """读取候选登记信息副本。"""
+        with self._pending_lock:
+            item = self._pending_shares.get(sid)
+            return dict(item) if item else None
+
+    def _cached_entry(self, sid: str) -> Optional[ShareEntry]:
+        """安全读取已有快照。"""
+        if not self._cache:
+            return None
+        try:
+            return self._cache.get(sid)
+        except Exception as error:  # noqa: BLE001 - 缓存损坏按未命中处理
+            logger.warning(f"读取分享缓存失败：{type(error).__name__}")
             return None
 
-    def _torrent_from_entry(self, entry: ShareEntry, site_name: str,
-                            pri_order: int, mtype: Optional[MediaType]) -> TorrentInfo:
-        """把分享快照包装成 MoviePilot 种子信息。"""
+    def _results_for_candidate(self, candidate: dict,
+                               mtype: Optional[MediaType]) -> list[TorrentInfo]:
+        """优先按缓存快照展开分集，未命中时只返回一条整包候选。"""
+        entry = self._cached_entry(str(candidate.get("sid") or ""))
+        if not entry:
+            for alt_sid in candidate.get("lookup_sids") or []:
+                entry = self._cached_entry(str(alt_sid))
+                if entry:
+                    candidate["sid"] = entry.sid
+                    self._remember_pending(candidate)
+                    break
+        if entry:
+            expanded = self._expand_candidate(candidate, entry, mtype)
+            if expanded:
+                return expanded
+        return [self._whole_candidate(candidate, entry, mtype)]
+
+    def _expand_candidate(self, candidate: dict, entry: ShareEntry,
+                          mtype: Optional[MediaType]) -> list[TorrentInfo]:
+        """按集号展开快照；无集号或同集重复时按规则收敛。"""
+        by_episode: dict[int, tuple[int, dict]] = {}
+        for item in entry.files:
+            if not isinstance(item, dict) or item.get("dir"):
+                continue
+            size = self._size_of(item.get("size"))
+            fid = str(item.get("fid") or "").strip()
+            if size <= 0 or not fid:
+                continue
+            episode = self._episode_of(str(item.get("name") or ""))
+            if episode is None:
+                continue
+            existing = by_episode.get(episode)
+            if existing is None or size > existing[0]:
+                by_episode[episode] = (size, item)
+        if not by_episode:
+            return []
+        share_title = str(candidate.get("title") or entry.title or entry.folder_name).strip()
+        results: list[TorrentInfo] = []
+        for episode, (size, item) in sorted(by_episode.items())[:MAX_EXPAND_FILES]:
+            file_name = str(item.get("name") or "file")
+            title = f"{share_title} {self._episode_label(file_name, episode)}".strip()
+            results.append(self._make_torrent(
+                candidate, title, size, int(candidate.get("expand_pri") or 5),
+                str(item.get("fid") or ""), mtype, f"单集 · {file_name}",
+            ))
+        return results
+
+    def _whole_candidate(self, candidate: dict, entry: Optional[ShareEntry],
+                         mtype: Optional[MediaType]) -> TorrentInfo:
+        """构造整包候选；未命中缓存时大小填 0。"""
+        size = self._size_of(candidate.get("size"))
+        title = str(candidate.get("title") or "")
+        detail = "整包 · 待展开"
+        if entry:
+            size = size or int(entry.total_size or 0)
+            title = title or entry.title
+            detail = f"整包 · {len(entry.files)} 个文件"
+        return self._make_torrent(
+            candidate, title, size, int(candidate.get("pri_order") or 0),
+            "", mtype, detail,
+        )
+
+    def _make_torrent(self, candidate: dict, title: str, size: int, pri_order: int,
+                      fid: str, mtype: Optional[MediaType], detail: str) -> TorrentInfo:
+        """把候选包装成 MoviePilot 种子信息。"""
         return TorrentInfo(
             site=None,
-            site_name=str(site_name or "pansou"),
-            title=entry.title,
-            description=f"网盘直链 · {len(entry.files)} 个文件",
-            enclosure=self._torrent_url(entry.sid),
-            page_url=entry.share_url,
-            size=float(entry.total_size),
+            site_name=str(candidate.get("site_name") or "pansou"),
+            title=str(title or candidate.get("share_url") or ""),
+            description=f"网盘直链 · {detail}",
+            enclosure=self._torrent_url(str(candidate.get("sid") or ""), fid),
+            page_url=str(candidate.get("share_url") or ""),
+            size=float(max(0, int(size))),
             seeders=0,
             pubdate=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             pri_order=int(pri_order),
             category=mtype.value if isinstance(mtype, MediaType) else None,
         )
+
+    @staticmethod
+    def _episode_label(name: str, episode: int) -> str:
+        """生成 SxxExx 标签；缺失季号时默认 S01。"""
+        match = SEASON_EPISODE_RE.search(name or "")
+        season = int(match.group(1)) if match else 1
+        return f"S{season:02d}E{int(episode):02d}"
+
+    def _submit_prewarm(self, candidates: list[dict]) -> None:
+        """把最多两个候选提交给单线程后台队列预热快照。"""
+        if not candidates or not self._cache or not hasattr(self._cache, "put"):
+            return
+        ensure_entry = self._ensure_entry
+        pending: list[dict] = []
+        with self._prewarm_lock:
+            for candidate in candidates:
+                sid = str(candidate.get("sid") or "")
+                if not sid or sid in self._prewarm_inflight:
+                    continue
+                self._prewarm_inflight.add(sid)
+                pending.append(candidate)
+            if not pending:
+                return
+            if self._prewarm_pool is None:
+                self._prewarm_pool = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="quarkchannel-prewarm",
+                )
+            for candidate in pending:
+                try:
+                    self._prewarm_pool.submit(self._prewarm_one, candidate, ensure_entry)
+                except RuntimeError:
+                    self._prewarm_inflight.discard(str(candidate.get("sid") or ""))
+
+    def _prewarm_one(self, candidate: dict, ensure_entry: Any) -> None:
+        """后台预热单个候选；慢一点启动，避免干扰搜索返回路径。"""
+        sid = str(candidate.get("sid") or "")
+        try:
+            time.sleep(PREWARM_DELAY_SECONDS)
+            with self._prewarm_lock:
+                if self._prewarm_pool is None:
+                    return
+            if self._cached_entry(sid):
+                return
+            ensure_entry(
+                str(candidate.get("share_url") or ""),
+                str(candidate.get("passcode") or ""),
+                str(candidate.get("title") or ""),
+            )
+        except Exception as error:  # noqa: BLE001 - 预热失败忽略
+            logger.debug(f"后台预热失败：{sid}，{type(error).__name__}")
+        finally:
+            with self._prewarm_lock:
+                self._prewarm_inflight.discard(sid)
 
     def download(self, content: Union[Path, str, bytes], download_dir: Path,
                  cookie: Optional[str] = None, episodes: Optional[set] = None,
@@ -768,15 +971,17 @@ class QuarkChannel(_PluginBase):
 
     # ---------- 插件接口实现 ----------
 
-    def api_torrent(self, sid: str = "", sig: str = "") -> Response:
-        """按分享 id 输出合成种子。"""
-        if not self._cache or not verify(sid, sig, self._secret):
+    def api_torrent(self, sid: str = "", sig: str = "", fid: str = "") -> Response:
+        """按分享 id 输出整包或单文件合成种子，缺失快照时现场补齐。"""
+        if not verify(sid, sig, self._secret):
             return Response(content=b"forbidden", status_code=403)
-        entry = self._cache.get(sid)
+        entry = self._cache.get(sid) if self._cache else None
+        if not entry:
+            entry = self._lazy_snapshot(sid)
         if not entry:
             return Response(content=b"not found", status_code=404)
         try:
-            payload = render_torrent(entry)
+            payload = render_torrent(entry, fid=fid or None)
         except ValueError as error:
             logger.warning(f"生成种子失败：{error}")
             return Response(content=b"invalid share", status_code=404)
@@ -785,6 +990,31 @@ class QuarkChannel(_PluginBase):
             media_type="application/x-bittorrent",
             headers={"Content-Disposition": f'attachment; filename="{sid}.torrent"'},
         )
+
+    def _lazy_snapshot(self, sid: str) -> Optional[ShareEntry]:
+        """按候选登记信息现场取快照，整体最多等待 8 秒。"""
+        pending = self._pending_info(sid)
+        if not pending or not pending.get("share_url"):
+            return None
+        executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="quarkchannel-snapshot",
+        )
+        try:
+            future = executor.submit(
+                self._ensure_entry,
+                str(pending.get("share_url") or ""),
+                str(pending.get("passcode") or ""),
+                str(pending.get("title") or ""),
+            )
+            return future.result(timeout=SNAPSHOT_TIMEOUT_SECONDS)
+        except FuturesTimeoutError:
+            logger.warning(f"现场读取分享超时：{sid}")
+            return None
+        except Exception as error:  # noqa: BLE001 - 取快照失败按 404 处理
+            logger.warning(f"现场读取分享失败：{sid}，{type(error).__name__}")
+            return None
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def api_share(self, payload: Optional[dict] = None) -> dict:
         """登记一条分享，返回种子地址（用于手工验证链路）。"""
@@ -1098,10 +1328,16 @@ class QuarkChannel(_PluginBase):
             return Path(text)
         return Path(self._download_root())
 
-    def _torrent_url(self, sid: str) -> str:
-        """合成种子的下载地址。"""
+    def _torrent_url(self, sid: str, fid: str = "") -> str:
+        """合成种子的下载地址；带 fid 时指向单个文件。"""
         base = str(self._config.get("mp_base_url") or "http://127.0.0.1:3000").rstrip("/")
-        return f"{base}/api/v1/plugin/QuarkChannel/torrent?sid={sid}&sig={sign(sid, self._secret)}"
+        url = (
+            f"{base}/api/v1/plugin/QuarkChannel/torrent"
+            f"?sid={quote(str(sid))}&sig={sign(str(sid), self._secret)}"
+        )
+        if fid:
+            url += f"&fid={quote(str(fid))}"
+        return url
 
     def _keyword_allowed(self, keyword: str) -> bool:
         """按白名单决定是否参与本次搜索。"""

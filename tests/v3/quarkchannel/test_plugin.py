@@ -9,7 +9,9 @@ import pytest
 from app.schemas import DOWNLOAD_TASK_ALREADY_EXISTS
 from quarkchannel import QuarkChannel
 from quarkchannel.downloader import STATE_COMPLETED, STATE_DOWNLOADING, STATE_ERROR
-from quarkchannel.torrents import ShareEntry, render_torrent
+from quarkchannel.sources import pansou as pansou_module
+from quarkchannel.sources.pansou import PansouSource
+from quarkchannel.torrents import ShareEntry, TorrentCache, build_sid, render_torrent
 
 
 class _Cache:
@@ -21,6 +23,36 @@ class _Cache:
     def get(self, sid: str):
         """无论 sid 都返回预设快照。"""
         return self._entry if sid == self._entry.sid else None
+
+
+class _Pansou:
+    """返回固定候选的盘搜桩。"""
+
+    ready = True
+
+    def __init__(self, rows: list[dict]):
+        self.rows = rows
+        self.calls = []
+
+    def search(self, keyword, limit=20, bypass_cache=False):
+        """记录调用并返回预设候选。"""
+        self.calls.append((keyword, limit, bypass_cache))
+        return list(self.rows)
+
+
+class _PansouResponse:
+    """盘搜 HTTP 响应桩。"""
+
+    status_code = 200
+    payload = {
+        "data": [
+            {"title": "缓存资源", "url": "https://pan.quark.cn/s/cache", "size": 123},
+        ],
+    }
+
+    def json(self):
+        """返回固定 JSON。"""
+        return self.payload
 
 
 class _Manager:
@@ -148,3 +180,170 @@ def test_download_retries_after_error_and_rejects_unmatched_episode(tmp_path: Pa
     rejected = plugin.download(content, tmp_path, episodes={99})
     assert rejected == (None, None, None, "没有匹配到需要下载的文件")
     assert manager.submit_count == 2
+
+
+def test_search_skips_snapshot_and_defers_prewarm(tmp_path: Path, monkeypatch):
+    """搜索链不调用 snapshot，首个候选只交给后台队列预热。"""
+    plugin = QuarkChannel()
+    plugin._enabled = True
+    plugin._config = {"max_results": 3}
+    plugin._secret = "secret"
+    plugin._cache = TorrentCache(tmp_path)
+    plugin._tg_index = None
+    plugin._pansou = _Pansou([
+        {"url": "https://pan.quark.cn/s/fast", "title": "快速资源",
+         "size": 512, "source": "pansou"},
+    ])
+    calls = []
+    monkeypatch.setattr(plugin, "_ensure_entry", lambda *args: calls.append(args))
+    try:
+        rows = plugin.search_torrents(keyword="快速")
+        assert len(rows) == 1
+        assert rows[0].size == 512.0
+        assert calls == []
+    finally:
+        plugin._stop_prewarm()
+
+
+def test_pansou_search_post_json_and_cache_hit(monkeypatch):
+    """pansou 使用 POST JSON，第二次相同查询命中缓存且不再请求。"""
+    class _FakeRequestUtils:
+        calls = []
+        last_json = None
+
+        def post_res(self, *args, **kwargs):
+            type(self).calls.append(args)
+            type(self).last_json = kwargs.get("json")
+            return _PansouResponse()
+
+    monkeypatch.setattr(pansou_module, "RequestUtils", _FakeRequestUtils)
+    source = PansouSource(
+        "http://pansou:8888", token="token", plugins="a,b", cloud_types="quark",
+    )
+    first = source.search("关键词", limit=1)
+    second = source.search("关键词", limit=1)
+    assert len(_FakeRequestUtils.calls) == 1
+    expected = _PansouResponse.payload["data"][0] | {"passcode": "", "source": "pansou"}
+    assert first == second == [expected]
+    assert _FakeRequestUtils.last_json == {
+        "kw": "关键词",
+        "res": "merge",
+        "src": "all",
+        "plugins": ["a", "b"],
+        "cloud_types": ["quark"],
+    }
+
+    source.search("关键词", limit=1, bypass_cache=True)
+    assert len(_FakeRequestUtils.calls) == 2
+
+
+def test_search_expands_cached_episodes_with_fid():
+    """缓存命中时按集展开，enclosure 带 fid 且 pansou 使用 pri_order=5。"""
+    url = "https://pan.quark.cn/s/expand"
+    sid = build_sid(url)
+    entry = ShareEntry(
+        sid=sid,
+        provider="quark",
+        share_url=url,
+        title="演示剧集",
+        files=[
+            {"name": "Show.S01E01.mkv", "size": 101, "fid": "f1"},
+            {"name": "Show.S01E02.mkv", "size": 202, "fid": "f2"},
+            {"name": "Show.S01E03.mkv", "size": 303, "fid": "f3"},
+        ],
+        total_size=606,
+    )
+    plugin = QuarkChannel()
+    plugin._enabled = True
+    plugin._config = {"max_results": 5}
+    plugin._secret = "secret"
+    plugin._cache = _Cache(entry)
+    plugin._tg_index = None
+    plugin._pansou = _Pansou([
+        {"url": url, "title": "演示剧集", "size": 606, "source": "pansou"},
+    ])
+    rows = plugin.search_torrents(keyword="演示")
+    assert [item.title for item in rows] == [
+        "演示剧集 S01E01", "演示剧集 S01E02", "演示剧集 S01E03",
+    ]
+    assert [item.size for item in rows] == [101.0, 202.0, 303.0]
+    assert [item.pri_order for item in rows] == [5, 5, 5]
+    assert ["fid=f1" in rows[0].enclosure, "fid=f2" in rows[1].enclosure,
+            "fid=f3" in rows[2].enclosure] == [True, True, True]
+
+
+def test_search_without_cache_returns_single_whole_candidate():
+    """没有快照时只返回一条整包候选，大小来自 pansou，未知则为 0。"""
+    plugin = QuarkChannel()
+    plugin._enabled = True
+    plugin._config = {"max_results": 5}
+    plugin._secret = "secret"
+    plugin._cache = None
+    plugin._tg_index = None
+    plugin._pansou = _Pansou([
+        {"url": "https://pan.quark.cn/s/plain", "title": "整包资源",
+         "size": 4096, "source": "pansou"},
+    ])
+    rows = plugin.search_torrents(keyword="资源")
+    assert len(rows) == 1
+    assert rows[0].title == "整包资源"
+    assert rows[0].size == 4096.0
+    assert "fid=" not in rows[0].enclosure
+
+
+def test_search_does_not_expand_movie_snapshot():
+    """文件数不超过 2 且无集号的电影保持一条整包候选。"""
+    url = "https://pan.quark.cn/s/movie"
+    sid = build_sid(url)
+    entry = ShareEntry(
+        sid=sid,
+        provider="quark",
+        share_url=url,
+        title="演示电影",
+        files=[
+            {"name": "Movie.2160p.mkv", "size": 1000, "fid": "m1"},
+            {"name": "Movie.1080p.mkv", "size": 800, "fid": "m2"},
+        ],
+        total_size=1800,
+    )
+    plugin = QuarkChannel()
+    plugin._enabled = True
+    plugin._config = {"max_results": 5}
+    plugin._secret = "secret"
+    plugin._cache = _Cache(entry)
+    plugin._tg_index = None
+    plugin._pansou = _Pansou([{"url": url, "title": "演示电影", "source": "pansou"}])
+    rows = plugin.search_torrents(keyword="电影")
+    assert len(rows) == 1
+    assert rows[0].title == "演示电影"
+    assert rows[0].size == 1800.0
+    assert "fid=" not in rows[0].enclosure
+
+
+def test_search_dedupes_episode_and_keeps_largest_file():
+    """同一集号只保留体积最大的文件，并按集号输出。"""
+    url = "https://pan.quark.cn/s/dupep"
+    sid = build_sid(url)
+    entry = ShareEntry(
+        sid=sid,
+        provider="quark",
+        share_url=url,
+        title="重复集",
+        files=[
+            {"name": "Show.S01E01.720p.mkv", "size": 100, "fid": "small"},
+            {"name": "Show.S01E01.1080p.mkv", "size": 300, "fid": "large"},
+            {"name": "Show.S01E02.mkv", "size": 200, "fid": "e2"},
+        ],
+        total_size=600,
+    )
+    plugin = QuarkChannel()
+    plugin._enabled = True
+    plugin._config = {"max_results": 5}
+    plugin._secret = "secret"
+    plugin._cache = _Cache(entry)
+    plugin._tg_index = None
+    plugin._pansou = _Pansou([{"url": url, "title": "重复集", "source": "pansou"}])
+    rows = plugin.search_torrents(keyword="重复")
+    assert len(rows) == 2
+    assert rows[0].size == 300.0 and "fid=large" in rows[0].enclosure
+    assert rows[1].size == 200.0 and "fid=e2" in rows[1].enclosure

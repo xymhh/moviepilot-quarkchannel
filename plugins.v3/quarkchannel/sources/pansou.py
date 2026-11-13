@@ -6,6 +6,9 @@ pansou 的返回结构在不同版本间有差异，这里做容错解析：
 
 from __future__ import annotations
 
+import threading
+import time
+from collections import OrderedDict
 from typing import Any, Iterable, Optional
 from urllib.parse import urlparse
 
@@ -13,6 +16,8 @@ from app.sdk.logging import logger
 from app.sdk.network import RequestUtils
 
 QUARK_HOSTS = ("pan.quark.cn",)
+CACHE_TTL_SECONDS = 15 * 60
+CACHE_MAX_ITEMS = 200
 
 
 def _walk(node: Any) -> Iterable[dict]:
@@ -57,6 +62,22 @@ def _pick_passcode(node: dict, url: str) -> str:
     return ""
 
 
+def _pick_size(node: dict) -> int:
+    """从节点中读取字节大小；缺失或格式异常时返回 0。"""
+    for key in ("size", "file_size", "size_bytes", "total_size", "bytes"):
+        value = node.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            return max(0, int(value))
+        if isinstance(value, str):
+            try:
+                return max(0, int(float(value.strip().replace(",", ""))))
+            except (TypeError, ValueError):
+                continue
+    return 0
+
+
 class PansouSource:
     """pansou 搜索源。"""
 
@@ -82,6 +103,8 @@ class PansouSource:
         self._src = (src or "all").strip() or "all"
         self._plugins = [item.strip() for item in (plugins or "").replace("，", ",").split(",") if item.strip()]
         self._cloud_types = [item.strip() for item in (cloud_types or "").replace("，", ",").split(",") if item.strip()]
+        self._search_cache: OrderedDict[tuple, tuple[float, list[dict]]] = OrderedDict()
+        self._cache_lock = threading.RLock()
 
     def _login(self) -> str:
         """用账号密码换取 JWT。
@@ -125,18 +148,48 @@ class PansouSource:
         """是否已配置服务地址。"""
         return bool(self._base)
 
-    def _query_params(self, keyword: str) -> dict:
-        """按配置组装搜索参数。
+    def _query_payload(self, keyword: str) -> dict:
+        """按配置组装 POST JSON 搜索参数。
 
         :param keyword: 关键词
-        :return: pansou /api/search 的查询参数
+        :return: pansou /api/search 的 JSON 请求体
         """
-        params: dict = {"kw": keyword, "res": "merge", "src": self._src, "ext": ""}
-        if self._plugins:
-            params["plugins"] = self._plugins
-        if self._cloud_types:
-            params["cloud_types"] = self._cloud_types
-        return params
+        return {
+            "kw": keyword,
+            "res": "merge",
+            "src": self._src,
+            "plugins": list(self._plugins),
+            "cloud_types": list(self._cloud_types),
+        }
+
+    def _cache_key(self, keyword: str) -> tuple:
+        """生成插件侧搜索缓存键。"""
+        return (keyword, self._src, tuple(self._plugins), tuple(self._cloud_types))
+
+    def _cache_get(self, key: tuple) -> Optional[list[dict]]:
+        """读取未过期的缓存副本，并刷新 LRU 顺序。"""
+        now = time.monotonic()
+        with self._cache_lock:
+            cached = self._search_cache.get(key)
+            if not cached:
+                return None
+            expires_at, rows = cached
+            if expires_at <= now:
+                self._search_cache.pop(key, None)
+                return None
+            self._search_cache.move_to_end(key)
+            return [dict(item) for item in rows]
+
+    def _cache_put(self, key: tuple, rows: list[dict]) -> None:
+        """写入缓存并按 LRU 限制条目数。"""
+        with self._cache_lock:
+            self._search_cache[key] = (
+                time.monotonic() + CACHE_TTL_SECONDS,
+                [dict(item) for item in rows],
+            )
+            self._search_cache.move_to_end(key)
+            while len(self._search_cache) > CACHE_MAX_ITEMS:
+                self._search_cache.popitem(last=False)
 
     def check_auth(self) -> tuple[bool, str]:
         """检查鉴权状态，供插件状态页展示。
@@ -152,30 +205,43 @@ class PansouSource:
             return False, "未填写盘搜账号或令牌"
         return False, "登录失败（账号密码错误或服务不可用）"
 
-    def search(self, keyword: str, limit: int = 20) -> list[dict]:
-        """搜索夸克分享。
-
-        :param keyword: 关键词
-        :param limit: 返回上限
-        :return: [{title, url, passcode, source}]，失败返回空列表
-        """
-        if not self._base or not keyword:
-            return []
-        response = RequestUtils().get_res(
+    def _request_search(self, keyword: str) -> Any:
+        """发起一次 POST 搜索，401 时自动重新登录后重试。"""
+        response = RequestUtils().post_res(
             f"{self._base}/api/search",
             headers=self._headers(),
-            params=self._query_params(keyword),
+            json=self._query_payload(keyword),
             timeout=self._timeout,
         )
         if response is not None and response.status_code == 401:
             self._token = self._login()
             if self._token:
-                response = RequestUtils().get_res(
+                response = RequestUtils().post_res(
                     f"{self._base}/api/search",
                     headers=self._headers(),
-                    params=self._query_params(keyword),
+                    json=self._query_payload(keyword),
                     timeout=self._timeout,
                 )
+        return response
+
+    def search(self, keyword: str, limit: int = 20,
+               bypass_cache: bool = False) -> list[dict]:
+        """搜索夸克分享，优先命中 15 分钟进程内缓存。
+
+        :param keyword: 关键词
+        :param limit: 返回上限
+        :param bypass_cache: 为 True 时跳过缓存读取，但仍刷新缓存
+        :return: [{title, url, passcode, size, source}]，失败返回空列表
+        """
+        if not self._base or not keyword:
+            return []
+        key = self._cache_key(keyword)
+        if not bypass_cache:
+            cached = self._cache_get(key)
+            if cached is not None:
+                logger.info(f"盘搜缓存命中：{keyword}，{len(cached)} 条")
+                return cached[:max(0, int(limit))]
+        response = self._request_search(keyword)
         if response is None:
             logger.warning("盘搜请求失败：无响应")
             return []
@@ -204,12 +270,14 @@ class PansouSource:
                 "title": title,
                 "url": url,
                 "passcode": _pick_passcode(node, url),
+                "size": _pick_size(node),
                 "source": "pansou",
             })
-            if len(candidates) >= limit:
+            if len(candidates) >= CACHE_MAX_ITEMS:
                 break
+        self._cache_put(key, candidates)
         logger.info(f"盘搜返回 {len(candidates)} 条夸克分享：{keyword}")
-        return candidates
+        return candidates[:max(0, int(limit))]
 
 
 def normalize_share_url(url: str) -> Optional[str]:

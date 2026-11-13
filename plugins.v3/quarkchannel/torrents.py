@@ -72,9 +72,26 @@ def verify(sid: str, signature: str, secret: str) -> bool:
     return hmac.compare_digest(sign(sid, secret), signature)
 
 
-def render_torrent(entry: ShareEntry) -> bytes:
-    """把分享快照渲染为种子字节串。"""
-    files = entry.share_files()
+def render_torrent(entry: ShareEntry, fid: Optional[str] = None) -> bytes:
+    """把分享快照渲染为种子字节串。
+
+    :param entry: 分享快照
+    :param fid: 可选文件 id；传入时只生成该单文件的种子
+    :return: 种子字节串
+    :raises ValueError: 快照没有可下载文件，或指定 fid 不存在
+    """
+    if fid:
+        target = next(
+            (item for item in entry.files if str(item.get("fid") or "") == str(fid)),
+            None,
+        )
+        if target is None:
+            raise ValueError("分享内找不到指定文件")
+        size = int(target.get("size") or 0)
+        name = str(target.get("name") or "file")
+        files = [{"length": size, "path": [name]}]
+    else:
+        files = entry.share_files()
     if not files:
         raise ValueError("分享内没有可下载的文件")
     return build_torrent(

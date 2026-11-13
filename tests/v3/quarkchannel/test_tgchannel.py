@@ -266,17 +266,16 @@ def test_search_torrents_merges_tg_and_pansou_by_sid(tmp_path, monkeypatch):
     ])
     plugin._pansou = _FakePansou([
         {"url": "https://pan.quark.cn/s/dup", "source": "pansou"},
-        {"url": "https://pan.quark.cn/s/pan2", "source": "pansou"},
+        {"url": "https://pan.quark.cn/s/pan2", "title": "盘搜资源", "source": "pansou"},
     ])
-    entries = {
-        "https://pan.quark.cn/s/dup": _entry("dup", "重复"),
-        "https://pan.quark.cn/s/tg2": _entry("tg2", "TG 资源"),
-        "https://pan.quark.cn/s/pan2": _entry("pan2", "盘搜资源"),
-    }
-    monkeypatch.setattr(plugin, "_ensure_entry", lambda url, code, title: entries.get(url))
+    calls = []
+    monkeypatch.setattr(
+        plugin, "_ensure_entry", lambda *args: calls.append(args),
+    )
     rows = plugin.search_torrents(keyword="资源")
     assert [item.title for item in rows] == ["重复", "TG 资源", "盘搜资源"]
     assert [item.pri_order for item in rows] == [10, 10, 0]
+    assert calls == []
 
 
 def test_search_torrents_tg_hits_limit_before_pansou(tmp_path, monkeypatch):
@@ -290,35 +289,32 @@ def test_search_torrents_tg_hits_limit_before_pansou(tmp_path, monkeypatch):
         {"sid": "b", "share_url": "https://pan.quark.cn/s/b", "title": "B"},
     ])
     plugin._pansou = _FakePansou([{"url": "https://pan.quark.cn/s/c", "source": "pansou"}])
-    entries = {url: _entry(sid, sid.upper()) for sid, url in {
-        "a": "https://pan.quark.cn/s/a", "b": "https://pan.quark.cn/s/b",
-        "c": "https://pan.quark.cn/s/c",
-    }.items()}
-    monkeypatch.setattr(plugin, "_ensure_entry", lambda url, code, title: entries.get(url))
     rows = plugin.search_torrents(keyword="x")
+    assert [item.title for item in rows] == ["A", "B"]
     assert [item.pri_order for item in rows] == [10, 10]
     assert plugin._pansou.calls == []
 
 
-def test_search_torrents_skips_failed_tg_and_continues(tmp_path, monkeypatch):
-    """索引条目快照失败时跳过，并继续使用 pansou。"""
+def test_search_torrents_returns_pansou_whole_without_snapshot(tmp_path, monkeypatch):
+    """pansou 未命中缓存时直接返回整包，不在搜索链取快照。"""
     plugin = QuarkChannel()
     plugin._enabled = True
     plugin._config = {"max_results": 5}
     plugin._secret = "secret"
-    plugin._tg_index = _FakeIndex([
-        {"sid": "bad", "share_url": "https://pan.quark.cn/s/bad", "title": "坏"},
+    plugin._tg_index = None
+    plugin._pansou = _FakePansou([
+        {"url": "https://pan.quark.cn/s/good", "title": "好资源",
+         "size": 2048, "source": "pansou"},
     ])
-    plugin._pansou = _FakePansou([{"url": "https://pan.quark.cn/s/good", "source": "pansou"}])
-
-    def ensure(url, code, title):
-        """只让 pansou 的链接成功。"""
-        return _entry("good", "好资源") if url.endswith("/good") else None
-
-    monkeypatch.setattr(plugin, "_ensure_entry", ensure)
+    calls = []
+    monkeypatch.setattr(
+        plugin, "_ensure_entry", lambda *args: calls.append(args),
+    )
     rows = plugin.search_torrents(keyword="资源")
     assert [item.title for item in rows] == ["好资源"]
+    assert rows[0].size == 2048.0
     assert rows[0].pri_order == 0
+    assert calls == []
 
 
 def test_api_status_reports_tg_index(tmp_path):
