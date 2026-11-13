@@ -40,6 +40,8 @@ docs/plan/                   # 调研与架构文档
 | --- | --- | --- |
 | 启用插件 | 关 | 关闭时不参与搜索，MoviePilot 回到原生 BT/PT |
 | 盘搜服务地址 | 空 | 自建 pansou，例如 `http://pansou:8888` |
+| 盘搜账号 / 密码 | 空 | pansou 开启 `AUTH_ENABLED` 时填写，插件自动登录换 JWT |
+| 盘搜访问令牌 | 空 | 也可直接填现成 JWT，优先于账号密码 |
 | MoviePilot 内部地址 | `http://127.0.0.1:3000` | 插件生成种子 URL 用，MoviePilot 自己会来拉 |
 | 夸克 Cookie | 空 | 可选，填了降低匿名请求被限概率 |
 | 下载根目录 | `/downloads` | 必须与 MoviePilot 下载目录一致 |

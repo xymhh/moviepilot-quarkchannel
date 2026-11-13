@@ -96,6 +96,9 @@ class QuarkChannel(_PluginBase):
         )
         self._pansou = PansouSource(
             str(config.get("pansou_url") or "").strip(),
+            token=str(config.get("pansou_token") or ""),
+            username=str(config.get("pansou_user") or ""),
+            password=str(config.get("pansou_password") or ""),
             timeout=max(5, min(int(config.get("pansou_timeout") or 20), 120)),
         )
         secret = str(config.get("sign_secret") or "").strip()
@@ -219,7 +222,7 @@ class QuarkChannel(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
+                                "props": {"cols": 12, "md": 4},
                                 "content": [
                                     {
                                         "component": "VTextField",
@@ -227,6 +230,48 @@ class QuarkChannel(_PluginBase):
                                             "model": "pansou_url",
                                             "label": "盘搜服务地址",
                                             "placeholder": "http://pansou:8888",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 8},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "pansou_token",
+                                            "label": "盘搜访问令牌（可选）",
+                                            "type": "password",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "pansou_user",
+                                            "label": "盘搜账号",
+                                            "hint": "开启鉴权时填写，插件自动登录换取令牌",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "pansou_password",
+                                            "label": "盘搜密码",
+                                            "type": "password",
                                         },
                                     }
                                 ],
@@ -296,6 +341,9 @@ class QuarkChannel(_PluginBase):
             "only_whitelist": False,
             "max_tasks": 3,
             "pansou_url": "",
+            "pansou_token": "",
+            "pansou_user": "",
+            "pansou_password": "",
             "mp_base_url": "http://127.0.0.1:3000",
             "quark_cookie": "",
             "download_root": "/downloads",

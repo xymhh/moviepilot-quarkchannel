@@ -60,16 +60,53 @@ def _pick_passcode(node: dict, url: str) -> str:
 class PansouSource:
     """pansou 搜索源。"""
 
-    def __init__(self, base_url: str, timeout: int = 20, proxy: bool = False) -> None:
-        """保存服务地址。
+    def __init__(self, base_url: str, token: str = "", username: str = "",
+                 password: str = "", timeout: int = 20) -> None:
+        """保存服务地址与访问凭据。
 
         :param base_url: 自建 pansou 地址，例如 http://pansou:8888
+        :param token: 已有 JWT，留空则由用户名密码自动登录
+        :param username: pansou 账号（AUTH_USERS 中的用户名）
+        :param password: pansou 密码
         :param timeout: 单次请求超时
-        :param proxy: 是否走系统代理
         """
         self._base = (base_url or "").rstrip("/")
+        self._token = (token or "").strip()
+        self._username = (username or "").strip()
+        self._password = password or ""
         self._timeout = timeout
-        self._proxy = proxy
+
+    def _login(self) -> str:
+        """用账号密码换取 JWT。
+
+        :return: 新 token；失败返回空串
+        """
+        if not self._username or not self._password:
+            return ""
+        response = RequestUtils().post_res(
+            f"{self._base}/api/auth/login",
+            json={"username": self._username, "password": self._password},
+            timeout=self._timeout,
+        )
+        if response is None:
+            return ""
+        try:
+            payload = response.json()
+        except Exception:  # noqa: BLE001 - 非 JSON 视为登录失败
+            return ""
+        token = str((payload or {}).get("token") or "")
+        if token:
+            logger.info("盘搜登录成功，已缓存访问令牌")
+        return token
+
+    def _headers(self) -> dict:
+        """构造请求头，无 token 时尝试自动登录一次。"""
+        if not self._token:
+            self._token = self._login()
+        headers = {"Accept": "application/json"}
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+        return headers
 
     @property
     def ready(self) -> bool:
@@ -87,6 +124,7 @@ class PansouSource:
             return []
         response = RequestUtils().get_res(
             f"{self._base}/api/search",
+            headers=self._headers(),
             params={
                 "kw": keyword,
                 "res": "merge",
@@ -96,8 +134,26 @@ class PansouSource:
             },
             timeout=self._timeout,
         )
+        if response is not None and response.status_code == 401:
+            self._token = self._login()
+            if self._token:
+                response = RequestUtils().get_res(
+                    f"{self._base}/api/search",
+                    headers=self._headers(),
+                    params={
+                        "kw": keyword,
+                        "res": "merge",
+                        "src": "all",
+                        "cloud_types": "quark",
+                        "ext": "",
+                    },
+                    timeout=self._timeout,
+                )
         if response is None:
             logger.warning("盘搜请求失败：无响应")
+            return []
+        if response.status_code == 401:
+            logger.warning("盘搜鉴权失败：请检查账号密码或令牌")
             return []
         try:
             payload = response.json()
