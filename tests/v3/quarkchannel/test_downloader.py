@@ -49,7 +49,7 @@ class _Client:
         self.save_calls.append((pwd_id, stoken, list(files)))
         return [f"saved-{item.fid}" for item in files]
 
-    def download_url_by_fid(self, fid):
+    def download_url_by_fid(self, fid, name="", retries=3):
         """记录转存 fid 并返回固定直链。"""
         self.link_fids.append(fid)
         return self._url, {"User-Agent": "test", "Referer": "https://pan.quark.cn/"}
@@ -437,9 +437,8 @@ def test_aria2_success_updates_progress_and_cleans_saved(tmp_path, monkeypatch):
             assert options["min-split-size"] == "1M"
             assert options["continue"] == "true"
             assert options["auto-file-renaming"] == "false"
-            assert options.get("user-agent") == "test"
-            assert all("User-Agent" not in line for line in options["header"])
-            assert all("Referer" not in line for line in options["header"])
+            assert any(line.startswith("User-Agent:") for line in options["header"])
+            assert any(line.startswith("Referer:") for line in options["header"])
         assert sorted(rpc.counts.values()) == [3, 3]
         assert client.save_calls and len(client.save_calls[0][2]) == 2
         assert client.delete_calls == [["saved-fid-0", "saved-fid-1"]]

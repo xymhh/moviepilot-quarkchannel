@@ -366,12 +366,9 @@ class DownloadManager:
                        headers: dict) -> dict:
         """构造 aria2.addUri 需要的下载选项。"""
         headers = headers or {}
-        # UA/Referer 用 aria2 原生选项下发：放进 header 会与 aria2 自带 UA 冲突，
-        # 夸克 CDN 会直接返回 412。
+        # 与生产可用实现一致：全部请求头放进 header 列表整体下发。
         header_list = [
-            f"{key}: {value}"
-            for key, value in headers.items()
-            if value and key.lower() not in {"user-agent", "referer"}
+            f"{key}: {value}" for key, value in headers.items() if value
         ]
         options = {
             "dir": task.content_path,
@@ -383,10 +380,6 @@ class DownloadManager:
             "continue": "true",
             "auto-file-renaming": "false",
         }
-        if headers.get("User-Agent"):
-            options["user-agent"] = headers["User-Agent"]
-        if headers.get("Referer"):
-            options["referer"] = headers["Referer"]
         return options
 
     def _remove_aria2_gids(self, gids: list[str]) -> None:
@@ -441,7 +434,9 @@ class DownloadManager:
                         task.speed = 0.0
                         self._flush()
                     return "stopped"
-                url, headers = client.download_url_by_fid(saved_map.get(id(item), ""))
+                url, headers = client.download_url_by_fid(
+                    saved_map.get(id(item), ""), name=item.name,
+                )
                 gid = rpc.add_uri(url, self._aria2_options(task, item, headers))
                 if not gid:
                     logger.warning(f"aria2 添加任务失败：{item.name}，回落到自研分片下载")
@@ -534,7 +529,7 @@ class DownloadManager:
                       saved_fid: Optional[str] = None) -> None:
         """下载单个文件（分片并行 + 断点续传），优先使用任务级转存 fid。"""
         if saved_fid:
-            url, headers = client.download_url_by_fid(saved_fid)
+            url, headers = client.download_url_by_fid(saved_fid, name=item.name)
         else:
             if not share_url:
                 raise ValueError("缺少分享地址，无法取链")

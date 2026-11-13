@@ -87,6 +87,7 @@ class QuarkShareClient:
         self._proxy = proxy
         self.keep_saved = bool(keep_saved)
         self._folder_fid: Optional[str] = None
+        self._last_pwd_id: str = ""
         self._request = RequestUtils()
 
     def _headers(self, referer: str = "https://pan.quark.cn/",
@@ -120,7 +121,7 @@ class QuarkShareClient:
 
     def _call(self, host: str, method: str, path: str, *, params: dict,
               payload: Optional[dict] = None, timeout: int = 20,
-              user_agent: str = "") -> dict:
+              user_agent: str = "", merge_common: bool = True) -> dict:
         """向指定域名发起一次接口调用，失败返回空字典。
 
         :param host: 接口域名（HOST_PAGE / HOST_SAVE / HOST_PC）
@@ -133,7 +134,7 @@ class QuarkShareClient:
         :return: 响应 JSON；异常或非 JSON 时返回空字典
         """
         url = f"{host}{path}"
-        merged = {**COMMON_PARAMS, **params}
+        merged = {**COMMON_PARAMS, **params} if merge_common else dict(params)
         try:
             if method == "GET":
                 response = self._request.get_res(
@@ -203,6 +204,7 @@ class QuarkShareClient:
         pwd_id = extract_pwd_id(share_url)
         if not pwd_id:
             raise ValueError("无法从链接中解析分享 id")
+        self._last_pwd_id = pwd_id
         token = token or self.stoken(pwd_id, passcode)
         if not token:
             raise ValueError("分享不可用或提取码错误")
@@ -443,47 +445,95 @@ class QuarkShareClient:
                     f"fid数={len(self._extract_top_fids(task_data))}"
                 )
                 batch_saved = self._extract_top_fids(task_data) or batch_saved
-            if len(batch_saved) != len(batch):
+            # 以「转存目录里真实存在的文件」为准：save_as 返回的 fid 在刚完成时
+            # 可能短暂不可用（21001 file not found），缺 fid 时轮询目录补齐。
+            try:
+                verified = self._match_folder_fids(names)
+            except ValueError:
+                verified = []
+            if len(verified) != len(batch) and len(batch_saved) != len(batch):
                 logger.info(
                     f"转存响应未给出完整 fid（{len(batch_saved)}/{len(batch)}），"
-                    f"响应键={sorted((data.get('data') or {}).keys())}，按目录名兜底"
+                    f"按目录名轮询补齐"
                 )
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    try:
+                        verified = self._match_folder_fids(names)
+                    except ValueError:
+                        verified = []
+                    if len(verified) == len(batch):
+                        break
+                    time.sleep(1.5)
+            if len(verified) == len(batch):
+                batch_saved = verified
+            elif len(batch_saved) != len(batch):
                 batch_saved = self._match_folder_fids(names)
             saved.extend(batch_saved[:len(batch)])
         return saved
 
-    def download_url_by_fid(self, fid: str) -> tuple[str, dict]:
+    def resolve_saved_fid(self, name: str) -> str:
+        """按文件名在转存目录里重新解析 fid。
+
+        :param name: 文件名
+        :return: 目录中的 fid；找不到返回空串
+        """
+        rows = self._folder_rows(self._folder_fid or "")
+        for row in rows:
+            if not bool(row.get("dir")) and str(row.get("file_name") or "") == name:
+                return str(row.get("fid") or "")
+        return ""
+
+    def download_url_by_fid(self, fid: str, name: str = "", retries: int = 3) -> tuple[str, dict]:
         """用自己网盘中的文件 fid 换取直链。
 
+        转存刚完成时 fid 可能短暂不可用（21001 file not found），
+        因此支持按文件名重新解析并重试。
+
         :param fid: 转存后的文件 fid
+        :param name: 文件名，用于 21001 时重新解析
+        :param retries: 重试次数
         :return: (下载地址, 需要携带的请求头)
         """
         data: dict = {}
         url = ""
         used_ua = CLIENT_UA
-        attempts: list[tuple[str, str, dict, str]] = (
-            # 与生产可用实现完全一致的通道顺序：先 PC 域名无附加参数，
+        attempts: list[tuple[str, str, dict, str, bool]] = (
+            # 与生产可用实现完全一致的通道顺序：先 PC 域名且不带公共参数，
             # 再造客户端参数走 share 域名，最后退回网页 UA。
-            ("drive-pc/PC-UA", HOST_PC, {}, CLIENT_UA),
-            ("drive/PC-UA", HOST_SAVE, dict(CLIENT_PARAMS), CLIENT_UA),
-            ("drive/网页-UA", HOST_SAVE, dict(CLIENT_PARAMS), PC_UA),
+            ("drive-pc/PC-UA", HOST_PC, {}, CLIENT_UA, False),
+            ("drive/PC-UA", HOST_SAVE, dict(CLIENT_PARAMS), CLIENT_UA, False),
+            ("drive/网页-UA", HOST_SAVE, dict(CLIENT_PARAMS), PC_UA, False),
         )
-        for channel, host, params, candidate_ua in attempts:
-            data = self._call(
-                host, "POST", "/1/clouddrive/file/download", params=params,
-                payload={"fids": [fid]}, user_agent=candidate_ua,
-            )
-            rows = data.get("data")
-            entry = rows[0] if isinstance(rows, list) and rows else {}
-            url = str((entry or {}).get("download_url") or "")
+        for attempt in range(max(1, retries)):
+            for channel, host, params, candidate_ua, merge_common in attempts:
+                data = self._call(
+                    host, "POST", "/1/clouddrive/file/download", params=params,
+                    payload={"fids": [fid]}, user_agent=candidate_ua,
+                    merge_common=merge_common,
+                )
+                rows = data.get("data")
+                entry = rows[0] if isinstance(rows, list) and rows else {}
+                url = str((entry or {}).get("download_url") or "")
+                if url:
+                    used_ua = candidate_ua
+                    logger.info(f"夸克取链成功：{channel}")
+                    break
+                logger.info(
+                    f"夸克取链通道 {channel} 未返回地址："
+                    f"code={data.get('code')} {data.get('message') or ''}".strip()
+                )
             if url:
-                used_ua = candidate_ua
-                logger.info(f"夸克取链成功：{channel}")
                 break
-            logger.info(
-                f"夸克取链通道 {channel} 未返回地址："
-                f"code={data.get('code')} {data.get('message') or ''}".strip()
-            )
+            message = str(data.get("message") or "")
+            if "file not found" not in message.lower() or attempt == max(1, retries) - 1:
+                break
+            time.sleep(1.5)
+            if name:
+                refreshed = self.resolve_saved_fid(name)
+                if refreshed and refreshed != fid:
+                    logger.info(f"转存 fid 暂不可用，改用目录中的新 fid：{refreshed}")
+                    fid = refreshed
         if not url:
             message = str(data.get("message") or "")
             raise ValueError(f"夸克未返回下载地址：{message or '未知原因'}")

@@ -71,7 +71,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.3.0"
+    plugin_version = "0.4.0"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -779,10 +779,61 @@ class QuarkChannel(_PluginBase):
                 "python": {"status": python_status, "bytes": len(body), "body": body_text},
                 "headers": sorted(headers.keys()),
                 "file": {"name": target.name, "size": target.size},
+                "aria2": self._aria2_variants(url, headers),
             }
         finally:
             client.delete_files(saved)
         return result
+
+    def _aria2_variants(self, url: str, headers: dict) -> list[dict]:
+        """用不同请求头组合让 aria2 试下载几秒，返回各自的状态。
+
+        :param url: 夸克直链
+        :param headers: 取链时使用的请求头
+        :return: [{variant, status, error}]
+        """
+        launcher = self._manager._aria2_launcher if self._manager else None
+        if launcher is None or not launcher.ensure():
+            return [{"variant": "none", "error": "aria2 不可用"}]
+        rpc = launcher.rpc
+        variants = {
+            "ua+referer": {
+                "user-agent": headers.get("User-Agent", ""),
+                "referer": headers.get("Referer", ""),
+            },
+            "ua+referer+cookie": {
+                "user-agent": headers.get("User-Agent", ""),
+                "referer": headers.get("Referer", ""),
+                "header": [f"Cookie: {headers.get('Cookie', '')}"] if headers.get("Cookie") else [],
+            },
+            "no-header": {},
+        }
+        results: list[dict] = []
+        for name, extra in variants.items():
+            options = {
+                "dir": "/tmp",
+                "out": f"diag-{name}",
+                "split": "4",
+                "max-connection-per-server": "4",
+                "min-split-size": "1M",
+                "continue": "false",
+                "auto-file-renaming": "true",
+            }
+            options.update(extra)
+            gid = rpc.add_uri(url, options)
+            if not gid:
+                results.append({"variant": name, "error": "addUri 失败"})
+                continue
+            time.sleep(3)
+            status = rpc.tell_status(gid) or {}
+            results.append({
+                "variant": name,
+                "status": status.get("status"),
+                "error": str(status.get("errorMessage") or "")[:120],
+                "done": status.get("completedLength"),
+            })
+            rpc.remove(gid)
+        return results
 
     def api_selftest(self, payload: Optional[dict] = None) -> dict:
         """按真实链路自检一条分享：快照 → 转存 → 取链，不下正文。
