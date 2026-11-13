@@ -1,0 +1,15 @@
+{
+  "QuarkChannel": {
+    "name": "网盘直链频道",
+    "description": "把夸克分享链接转成 MoviePilot 原生种子资源，并由插件完成取链与本地分片下载，其余流程全部复用 MoviePilot。",
+    "labels": "网盘,下载",
+    "version": "0.1.0",
+    "icon": "QuarkChannel.png",
+    "author": "xymhh",
+    "level": 1,
+    "system_version": ">=3.2.0",
+    "history": {
+      "v0.1.0": "首个版本：盘搜资源源 + 合成种子 + 夸克分享直链分片下载 + 任务状态回报。"
+    }
+  }
+}
