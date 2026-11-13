@@ -89,12 +89,17 @@ class PansouSource:
             timeout=self._timeout,
         )
         if response is None:
+            logger.warning("盘搜登录失败：请求无响应")
             return ""
         try:
             payload = response.json()
         except Exception:  # noqa: BLE001 - 非 JSON 视为登录失败
+            logger.warning(f"盘搜登录失败：响应非 JSON（HTTP {response.status_code}）")
             return ""
         token = str((payload or {}).get("token") or "")
+        if not token:
+            reason = str((payload or {}).get("error") or (payload or {}).get("message") or "")
+            logger.warning(f"盘搜登录失败：HTTP {response.status_code} {reason}".strip())
         if token:
             logger.info("盘搜登录成功，已缓存访问令牌")
         return token
@@ -112,6 +117,20 @@ class PansouSource:
     def ready(self) -> bool:
         """是否已配置服务地址。"""
         return bool(self._base)
+
+    def check_auth(self) -> tuple[bool, str]:
+        """检查鉴权状态，供插件状态页展示。
+
+        :return: (是否可用, 失败原因)；未开启鉴权时视为可用
+        """
+        if not self._base:
+            return False, "未配置盘搜地址"
+        token = self._token or self._login()
+        if token:
+            return True, ""
+        if not self._username:
+            return False, "未填写盘搜账号或令牌"
+        return False, "登录失败（账号密码错误或服务不可用）"
 
     def search(self, keyword: str, limit: int = 20) -> list[dict]:
         """搜索夸克分享。

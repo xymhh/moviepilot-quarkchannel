@@ -145,6 +145,12 @@ def _install_stubs() -> None:
     schemas.DownloaderFile = _DownloaderFile
     app.schemas = schemas
 
+    domain = _module("app.domain")
+    context = _module("app.domain.context")
+    context.TorrentInfo = _TorrentInfo
+    domain.context = context
+    app.domain = domain
+
     types_module = _module("app.schemas.types")
     types_module.MediaType = _MediaType
     types_module.TorrentQueryStatus = _TorrentQueryStatus

@@ -15,8 +15,8 @@ from app.sdk.network import RequestUtils
 
 PC_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) quark-cloud-drive/2.5.20 Chrome/100.0.4896.160 "
-    "Electron/18.3.5.2 Safari/537.36 Channel/pckk_other_ch"
+    "(KHTML, like Gecko) quark-cloud-drive/3.20.0 Chrome/112.0.5615.165 "
+    "Electron/24.1.3.8 Safari/537.36 Channel/pckk_other_ch"
 )
 BASE_HOSTS = (
     "https://drive-h.quark.cn",
@@ -224,15 +224,14 @@ class QuarkShareClient:
         token = self.stoken(pwd_id, passcode)
         if not token:
             raise ValueError("分享不可用，无法取链")
-        payload = {
-            "fids": [file_item.fid],
-            "pwd_id": pwd_id,
-            "stoken": token,
-        }
-        if file_item.share_token:
-            payload["fids_token"] = [file_item.share_token]
+        # 夸克分享内的文件可以直接用分享路径的 fid 换直链：入口参数 entry=ft，
+        # 必须伪装 PC 客户端 UA，否则会被判成游客并撞上 23018 限制。
+        payload = {"fids": [file_item.fid]}
         data = self._call(
-            "POST", "/1/clouddrive/share/sharepage/download", params={}, payload=payload,
+            "POST",
+            "/1/clouddrive/file/download",
+            params={"entry": "ft", "fr": "pc", "pr": "ucpro"},
+            payload=payload,
         )
         rows = data.get("data")
         entry = rows[0] if isinstance(rows, list) and rows else {}

@@ -24,8 +24,12 @@ from app.schemas import (
     DOWNLOAD_TASK_ALREADY_EXISTS,
     DownloaderFile,
     DownloaderTorrent,
-    TorrentInfo,
 )
+
+try:  # 与站点索引模块同源：MoviePilot 搜索链会直接调用 to_dict()
+    from app.domain.context import TorrentInfo
+except ImportError:  # pragma: no cover - 兼容宿主结构调整
+    from app.schemas import TorrentInfo
 from app.schemas.types import MediaType, TorrentQueryStatus
 
 from .downloader import (
@@ -155,6 +159,13 @@ class QuarkChannel(_PluginBase):
                 "methods": ["GET"],
                 "auth": "bear",
                 "summary": "查看任务与缓存状态",
+            },
+            {
+                "path": "/probe",
+                "endpoint": self.api_probe,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "按关键词探测盘搜与分享可用性（排障用）",
             },
             {
                 "path": "/cleanup",
@@ -602,13 +613,18 @@ class QuarkChannel(_PluginBase):
         }
 
     def api_status(self) -> dict:
-        """返回运行状态。"""
+        """返回运行状态（含盘搜鉴权自检）。"""
         tasks = self._manager.tasks() if self._manager else []
+        pansou_ok, pansou_reason = (False, "未初始化")
+        if self._pansou:
+            pansou_ok, pansou_reason = self._pansou.check_auth()
         return {
             "success": True,
             "data": {
                 "enabled": self._enabled,
                 "pansou": bool(self._pansou and self._pansou.ready),
+                "pansou_ok": pansou_ok,
+                "pansou_reason": pansou_reason,
                 "download_root": self._download_root(),
                 "tasks": [
                     {
@@ -622,6 +638,42 @@ class QuarkChannel(_PluginBase):
                     for item in tasks
                 ],
             },
+        }
+
+    def api_probe(self, payload: Optional[dict] = None) -> dict:
+        """按关键词跑一遍取链流程，返回候选与文件数（不下载）。
+
+        :param payload: {"keyword": "...", "limit": 3}
+        :return: 探测结果
+        """
+        payload = payload or {}
+        keyword = str(payload.get("keyword") or "").strip()
+        limit = max(1, min(int(payload.get("limit") or 3), 5))
+        if not keyword:
+            return {"success": False, "message": "缺少 keyword"}
+        if not self._pansou or not self._pansou.ready:
+            return {"success": False, "message": "盘搜未配置"}
+        hits = self._pansou.search(keyword, limit=limit * 2)
+        rows = []
+        errors = []
+        for item in hits:
+            if len(rows) >= limit:
+                break
+            entry = self._ensure_entry(item["url"], item.get("passcode", ""), item.get("title", ""))
+            if not entry:
+                errors.append(item["url"])
+                continue
+            rows.append({
+                "title": entry.title,
+                "sid": entry.sid,
+                "size": entry.total_size,
+                "files": len(entry.files),
+                "share_url": entry.share_url,
+                "torrent": self._torrent_url(entry.sid),
+            })
+        return {
+            "success": bool(rows),
+            "data": {"keyword": keyword, "hits": len(hits), "entries": rows, "failed": errors[:5]},
         }
 
     def api_cleanup(self) -> dict:

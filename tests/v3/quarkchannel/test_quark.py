@@ -109,16 +109,17 @@ def test_snapshot_recurses_dirs_and_keeps_share_token(monkeypatch):
     assert ("0", 1) in detail_calls and ("dir-1", 1) in detail_calls
 
 
-def test_download_url_passes_share_fid_token(monkeypatch):
-    """取直链时把 share_fid_token 作为 fids_token 透传。"""
+def test_download_url_uses_file_download_entry_ft(monkeypatch):
+    """取直链走 /file/download 且带 entry=ft（分享直下不需要转存）。"""
     captured = {}
 
     def handler(method, url, kwargs):
-        """记录下载请求体并返回直链。"""
+        """记录下载请求体与查询参数并返回直链。"""
         if method == "POST" and url.endswith("/token"):
             return _Resp({"status": 200, "data": {"stoken": "tk"}})
-        if method == "POST" and url.endswith("/download"):
+        if method == "POST" and url.endswith("/file/download"):
             captured.update(kwargs.get("json") or {})
+            captured["params"] = kwargs.get("params") or {}
             return _Resp({"status": 200, "data": [{"download_url": "https://dl.example/file"}]})
         return _Resp({"status": 500})
 
@@ -127,9 +128,9 @@ def test_download_url_passes_share_fid_token(monkeypatch):
     item = ShareFile(fid="f1", name="a.mkv", size=1, share_token="file-token")
     url, headers = client.download_url("https://pan.quark.cn/s/abcd", "1234", item)
     assert url == "https://dl.example/file"
-    assert headers["User-Agent"]
+    assert headers["User-Agent"].startswith("Mozilla/5.0")
     assert captured["fids"] == ["f1"]
-    assert captured["fids_token"] == ["file-token"]
+    assert captured["params"]["entry"] == "ft"
 
 
 @pytest.mark.parametrize(
