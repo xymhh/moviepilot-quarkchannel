@@ -71,7 +71,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.4.0"
+    plugin_version = "0.5.0"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -128,6 +128,9 @@ class QuarkChannel(_PluginBase):
             username=str(config.get("pansou_user") or ""),
             password=str(config.get("pansou_password") or ""),
             timeout=max(5, min(int(config.get("pansou_timeout") or 20), 120)),
+            src=str(config.get("pansou_src") or "all"),
+            plugins=str(config.get("pansou_plugins") or ""),
+            cloud_types=str(config.get("pansou_cloud_types") or "quark"),
         )
         if self._enabled:
             self._ensure_downloader_entry()
@@ -426,6 +429,56 @@ class QuarkChannel(_PluginBase):
                         },
                     },
                     {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSelect",
+                                        "props": {
+                                            "model": "pansou_src",
+                                            "label": "盘搜来源",
+                                            "items": [
+                                                {"title": "全部来源", "value": "all"},
+                                                {"title": "仅 TG 频道", "value": "tg"},
+                                                {"title": "仅插件源", "value": "plugin"},
+                                            ],
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "pansou_plugins",
+                                            "label": "指定盘搜插件（逗号分隔，空=全部）",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "pansou_cloud_types",
+                                            "label": "网盘类型（逗号分隔）",
+                                            "placeholder": "quark,115",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
                         "component": "VTextField",
                         "props": {
                             "model": "keyword_whitelist",
@@ -443,6 +496,9 @@ class QuarkChannel(_PluginBase):
             "pansou_token": "",
             "pansou_user": "",
             "pansou_password": "",
+            "pansou_src": "all",
+            "pansou_plugins": "",
+            "pansou_cloud_types": "quark",
             "mp_base_url": "http://127.0.0.1:3000",
             "quark_cookie": "",
             "download_root": "/downloads",

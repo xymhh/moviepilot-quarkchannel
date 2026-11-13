@@ -61,7 +61,8 @@ class PansouSource:
     """pansou 搜索源。"""
 
     def __init__(self, base_url: str, token: str = "", username: str = "",
-                 password: str = "", timeout: int = 20) -> None:
+                 password: str = "", timeout: int = 20, src: str = "all",
+                 plugins: str = "", cloud_types: str = "quark") -> None:
         """保存服务地址与访问凭据。
 
         :param base_url: 自建 pansou 地址，例如 http://pansou:8888
@@ -69,12 +70,18 @@ class PansouSource:
         :param username: pansou 账号（AUTH_USERS 中的用户名）
         :param password: pansou 密码
         :param timeout: 单次请求超时
+        :param src: 数据来源类型：all / tg（仅 Telegram 频道）/ plugin（仅插件）
+        :param plugins: 指定启用的 pansou 插件，逗号分隔；空表示全部
+        :param cloud_types: 返回的网盘类型，逗号分隔；空表示全部
         """
         self._base = (base_url or "").rstrip("/")
         self._token = (token or "").strip()
         self._username = (username or "").strip()
         self._password = password or ""
         self._timeout = timeout
+        self._src = (src or "all").strip() or "all"
+        self._plugins = [item.strip() for item in (plugins or "").replace("，", ",").split(",") if item.strip()]
+        self._cloud_types = [item.strip() for item in (cloud_types or "").replace("，", ",").split(",") if item.strip()]
 
     def _login(self) -> str:
         """用账号密码换取 JWT。
@@ -118,6 +125,19 @@ class PansouSource:
         """是否已配置服务地址。"""
         return bool(self._base)
 
+    def _query_params(self, keyword: str) -> dict:
+        """按配置组装搜索参数。
+
+        :param keyword: 关键词
+        :return: pansou /api/search 的查询参数
+        """
+        params: dict = {"kw": keyword, "res": "merge", "src": self._src, "ext": ""}
+        if self._plugins:
+            params["plugins"] = self._plugins
+        if self._cloud_types:
+            params["cloud_types"] = self._cloud_types
+        return params
+
     def check_auth(self) -> tuple[bool, str]:
         """检查鉴权状态，供插件状态页展示。
 
@@ -144,13 +164,7 @@ class PansouSource:
         response = RequestUtils().get_res(
             f"{self._base}/api/search",
             headers=self._headers(),
-            params={
-                "kw": keyword,
-                "res": "merge",
-                "src": "all",
-                "cloud_types": "quark",
-                "ext": "",
-            },
+            params=self._query_params(keyword),
             timeout=self._timeout,
         )
         if response is not None and response.status_code == 401:
@@ -159,13 +173,7 @@ class PansouSource:
                 response = RequestUtils().get_res(
                     f"{self._base}/api/search",
                     headers=self._headers(),
-                    params={
-                        "kw": keyword,
-                        "res": "merge",
-                        "src": "all",
-                        "cloud_types": "quark",
-                        "ext": "",
-                    },
+                    params=self._query_params(keyword),
                     timeout=self._timeout,
                 )
         if response is None:
