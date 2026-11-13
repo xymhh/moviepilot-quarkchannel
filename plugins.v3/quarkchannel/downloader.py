@@ -17,9 +17,11 @@ from typing import Callable, Optional
 from app.sdk.logging import logger
 from app.sdk.network import RequestUtils
 
+from .aria2 import Aria2Launcher
 from .shares.quark import QuarkShareClient, ShareFile, extract_pwd_id
 
 CHUNK_SIZE = 16 * 1024 * 1024
+ARIA2_POLL_INTERVAL = 2.0
 STATE_DOWNLOADING = "downloading"
 STATE_COMPLETED = "completed"
 STATE_ERROR = "error"
@@ -79,12 +81,18 @@ class DownloadManager:
     """任务与下载线程的管理者。"""
 
     def __init__(self, data_dir: Path, client_factory: Callable[[], QuarkShareClient],
-                 max_tasks: int = 3) -> None:
+                 max_tasks: int = 3, aria2_enabled: bool = True,
+                 aria2_connections: int = 64, aria2_split: int = 64,
+                 aria2_launcher: Optional[Aria2Launcher] = None) -> None:
         """初始化管理器并恢复历史任务。
 
         :param data_dir: 插件数据目录
         :param client_factory: 取链客户端工厂（每个 worker 独立实例）
         :param max_tasks: 同时下载的任务数
+        :param aria2_enabled: 是否优先使用 aria2 RPC 下载
+        :param aria2_connections: aria2 单服务器连接数
+        :param aria2_split: aria2 单文件分片数
+        :param aria2_launcher: aria2 启动器；为空时强制使用自研分片
         """
         self._data_dir = data_dir
         self._file = data_dir / "tasks.json"
@@ -95,6 +103,11 @@ class DownloadManager:
         self._pool = ThreadPoolExecutor(max_workers=max_tasks, thread_name_prefix="quarkchannel")
         self._share_urls: dict[str, str] = {}
         self._passcodes: dict[str, str] = {}
+        self._aria2_enabled = bool(aria2_enabled)
+        self._aria2_connections = max(1, int(aria2_connections))
+        self._aria2_split = max(1, int(aria2_split))
+        self._aria2_launcher = aria2_launcher
+        self._aria2_gids: dict[str, list[str]] = {}
         self._load()
 
     # ---------- 持久化 ----------
@@ -171,7 +184,8 @@ class DownloadManager:
         return task
 
     def stop(self, task_hash: str) -> bool:
-        """停止任务（保留已下载内容）。"""
+        """停止任务（保留已下载内容），并尽量移除 aria2 任务。"""
+        gids: list[str] = []
         with self._lock:
             task = self._tasks.get(task_hash)
             event = self._stops.get(task_hash)
@@ -180,8 +194,10 @@ class DownloadManager:
             event.set()
             task.state = STATE_STOPPED
             task.updated_at = time.time()
+            gids = self._aria2_gids.pop(task_hash, [])
             self._flush()
-            return True
+        self._remove_aria2_gids(gids)
+        return True
 
     def resume(self, task_hash: str) -> bool:
         """继续已停止的任务。"""
@@ -198,12 +214,14 @@ class DownloadManager:
         return True
 
     def remove(self, hashes: list[str], delete_file: bool = False) -> bool:
-        """删除任务记录，可选删除已下载文件。"""
+        """删除任务记录，可选删除已下载文件，并移除对应 aria2 任务。"""
         changed = False
+        gids: list[str] = []
         with self._lock:
             for task_hash in hashes:
                 task = self._tasks.pop(task_hash, None)
                 event = self._stops.pop(task_hash, None)
+                gids.extend(self._aria2_gids.pop(task_hash, []))
                 if event:
                     event.set()
                 if not task:
@@ -213,18 +231,26 @@ class DownloadManager:
                     self._delete_content(task)
             if changed:
                 self._flush()
+        self._remove_aria2_gids(gids)
         return changed
 
     def shutdown(self) -> None:
-        """停止全部任务并关闭线程池。"""
+        """停止全部任务、移除 aria2 任务并关闭线程池。"""
+        gids: list[str] = []
         with self._lock:
             for event in self._stops.values():
                 event.set()
             for task in self._tasks.values():
                 if task.state == STATE_DOWNLOADING:
                     task.state = STATE_STOPPED
+            for task_gids in self._aria2_gids.values():
+                gids.extend(task_gids)
+            self._aria2_gids.clear()
             self._flush()
+        self._remove_aria2_gids(gids)
         self._pool.shutdown(wait=False, cancel_futures=True)
+        if self._aria2_launcher:
+            self._aria2_launcher.stop()
 
     # ---------- 下载执行 ----------
 
@@ -301,14 +327,20 @@ class DownloadManager:
                     )
                 saved_fids = list(saved)
                 saved_map = {id(item): fid for item, fid in zip(pending, saved)}
-            for item in task.files:
-                if event.is_set():
+            aria2_mode = "none"
+            if pending and not event.is_set():
+                aria2_mode = self._run_aria2(task, event, client, pending, saved_map)
+                if aria2_mode == "stopped":
                     return
-                if item.done >= item.size > 0:
-                    continue
-                self._download_one(
-                    task, event, client, share_url, passcode, item, saved_map.get(id(item)),
-                )
+            if aria2_mode != "completed":
+                for item in task.files:
+                    if event.is_set():
+                        return
+                    if item.done >= item.size > 0:
+                        continue
+                    self._download_one(
+                        task, event, client, share_url, passcode, item, saved_map.get(id(item)),
+                    )
             with self._lock:
                 task.done = sum(item.done for item in task.files)
                 task.state = STATE_COMPLETED
@@ -329,6 +361,157 @@ class DownloadManager:
                 task.speed = 0.0
                 task.updated_at = time.time()
                 self._flush()
+
+    def _aria2_options(self, task: DownloadTask, item: TaskFile,
+                       headers: dict) -> dict:
+        """构造 aria2.addUri 需要的下载选项。"""
+        header_list = [
+            f"{key}: {value}" for key, value in (headers or {}).items() if value
+        ]
+        return {
+            "dir": task.content_path,
+            "out": item.rel_path,
+            "header": header_list,
+            "split": str(self._aria2_split),
+            "max-connection-per-server": str(self._aria2_connections),
+            "min-split-size": "1M",
+            "continue": "true",
+            "auto-file-renaming": "false",
+        }
+
+    def _remove_aria2_gids(self, gids: list[str]) -> None:
+        """尽力从 aria2 移除 gid，不向调用方抛异常。"""
+        launcher = self._aria2_launcher
+        rpc = getattr(launcher, "rpc", None) if launcher else None
+        if not gids or rpc is None:
+            return
+        for gid in gids:
+            try:
+                rpc.remove(gid)
+            except Exception:  # noqa: BLE001 - 清理失败不影响任务状态
+                pass
+
+    def _discard_aria2_partials(self, task: DownloadTask,
+                                records: list[tuple[TaskFile, str]]) -> None:
+        """删除 aria2 已产生的不完整文件，避免回落后误判为已完成。"""
+        for item, _gid in records:
+            with self._lock:
+                item.done = 0
+            try:
+                (Path(task.content_path) / item.rel_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _run_aria2(self, task: DownloadTask, event: threading.Event,
+                   client: QuarkShareClient, pending: list[TaskFile],
+                   saved_map: dict[int, str]) -> str:
+        """用 aria2 下载待处理文件；返回 completed/fallback/stopped。"""
+        launcher = self._aria2_launcher
+        if not self._aria2_enabled or launcher is None:
+            return "fallback"
+        try:
+            if not launcher.ensure():
+                logger.warning("aria2 不可用（RPC 探测失败），回落到自研分片下载")
+                return "fallback"
+        except Exception as error:  # noqa: BLE001 - aria2 异常必须回落
+            logger.warning(f"aria2 启动探测异常，回落到自研分片下载：{error}")
+            return "fallback"
+        rpc = getattr(launcher, "rpc", None)
+        if rpc is None:
+            logger.warning("aria2 RPC 客户端缺失，回落到自研分片下载")
+            return "fallback"
+        records: list[tuple[TaskFile, str]] = []
+        try:
+            for item in pending:
+                if event.is_set():
+                    self._remove_aria2_gids([gid for _item, gid in records])
+                    with self._lock:
+                        self._aria2_gids.pop(task.hash, None)
+                        task.state = STATE_STOPPED
+                        task.speed = 0.0
+                        self._flush()
+                    return "stopped"
+                url, headers = client.download_url_by_fid(saved_map.get(id(item), ""))
+                gid = rpc.add_uri(url, self._aria2_options(task, item, headers))
+                if not gid:
+                    logger.warning(f"aria2 添加任务失败：{item.name}，回落到自研分片下载")
+                    self._remove_aria2_gids([gid for _item, gid in records])
+                    self._discard_aria2_partials(task, records)
+                    with self._lock:
+                        self._aria2_gids.pop(task.hash, None)
+                    return "fallback"
+                records.append((item, gid))
+                with self._lock:
+                    self._aria2_gids.setdefault(task.hash, []).append(gid)
+        except Exception as error:  # noqa: BLE001 - 取链或添加异常回落
+            logger.warning(f"aria2 取链/添加异常，回落到自研分片下载：{error}")
+            self._remove_aria2_gids([gid for _item, gid in records])
+            self._discard_aria2_partials(task, records)
+            with self._lock:
+                self._aria2_gids.pop(task.hash, None)
+            return "fallback"
+        while True:
+            if event.is_set():
+                self._remove_aria2_gids([gid for _item, gid in records])
+                with self._lock:
+                    self._aria2_gids.pop(task.hash, None)
+                    task.state = STATE_STOPPED
+                    task.speed = 0.0
+                    task.updated_at = time.time()
+                    self._flush()
+                return "stopped"
+            total_done = 0
+            total_speed = 0
+            all_complete = True
+            aria2_error = ""
+            for item, gid in records:
+                status = rpc.tell_status(gid)
+                if not isinstance(status, dict):
+                    logger.warning(f"aria2 状态查询失败：{item.name}，回落到自研分片下载")
+                    self._remove_aria2_gids([gid for _item, gid in records])
+                    self._discard_aria2_partials(task, records)
+                    with self._lock:
+                        self._aria2_gids.pop(task.hash, None)
+                    return "fallback"
+                state = str(status.get("status") or "")
+                if state == "error":
+                    aria2_error = str(status.get("errorMessage") or "未知错误")[:200]
+                    break
+                try:
+                    completed = int(status.get("completedLength") or 0)
+                except (TypeError, ValueError):
+                    completed = 0
+                try:
+                    speed = int(status.get("downloadSpeed") or 0)
+                except (TypeError, ValueError):
+                    speed = 0
+                item.done = min(item.size, completed) if item.size > 0 else completed
+                total_done += item.done
+                total_speed += speed
+                if state != "complete":
+                    all_complete = False
+            if aria2_error:
+                self._remove_aria2_gids([gid for _item, gid in records])
+                self._discard_aria2_partials(task, records)
+                with self._lock:
+                    self._aria2_gids.pop(task.hash, None)
+                raise RuntimeError(f"aria2 下载失败：{aria2_error}"[:200])
+            with self._lock:
+                task.done = min(task.total, total_done) if task.total else total_done
+                task.speed = float(total_speed)
+                task.updated_at = time.time()
+                self._flush()
+            if all_complete:
+                with self._lock:
+                    self._aria2_gids.pop(task.hash, None)
+                    for item, _gid in records:
+                        item.done = item.size
+                    task.done = sum(entry.done for entry in task.files)
+                    task.speed = 0.0
+                    task.updated_at = time.time()
+                    self._flush()
+                return "completed"
+            time.sleep(ARIA2_POLL_INTERVAL)
 
     def _download_one(self, task: DownloadTask, event: threading.Event, client: QuarkShareClient,
                       share_url: str, passcode: str, item: TaskFile,

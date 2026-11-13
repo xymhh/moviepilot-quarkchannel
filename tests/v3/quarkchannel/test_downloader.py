@@ -65,6 +65,69 @@ class _Client:
         return True
 
 
+class _FakeAria2Rpc:
+    """模拟 aria2 RPC 的添加、状态查询与移除。"""
+
+    def __init__(self, size: int = 10, mode: str = "success",
+                 error_message: str = "aria2 error", add_result: bool = True):
+        self.size = size
+        self.mode = mode
+        self.error_message = error_message
+        self.add_result = add_result
+        self.add_calls = []
+        self.counts = {}
+        self.removed = []
+
+    def add_uri(self, url, options):
+        """记录 URL 与选项并返回递增 gid。"""
+        self.add_calls.append((url, dict(options)))
+        if not self.add_result:
+            return None
+        return f"gid-{len(self.add_calls)}"
+
+    def tell_status(self, gid):
+        """按调用次数返回等待、下载中、完成，或直接返回错误。"""
+        count = self.counts.get(gid, 0)
+        self.counts[gid] = count + 1
+        if self.mode == "error":
+            return {"status": "error", "errorMessage": self.error_message}
+        if count == 0:
+            return {"status": "waiting", "completedLength": "0", "downloadSpeed": "0"}
+        if count == 1:
+            return {
+                "status": "active",
+                "completedLength": str(self.size // 2),
+                "downloadSpeed": "1024",
+            }
+        return {
+            "status": "complete",
+            "completedLength": str(self.size),
+            "downloadSpeed": "0",
+        }
+
+    def remove(self, gid):
+        """记录被移除的 gid。"""
+        self.removed.append(gid)
+        return gid
+
+
+class _FakeLauncher:
+    """模拟 aria2 启动器。"""
+
+    def __init__(self, rpc: _FakeAria2Rpc, available: bool = True):
+        self.rpc = rpc
+        self.available = available
+        self.stop_calls = 0
+
+    def ensure(self):
+        """返回预设可用状态。"""
+        return self.available
+
+    def stop(self):
+        """记录停止次数。"""
+        self.stop_calls += 1
+
+
 def _range_utils(source: bytes, calls: list[tuple[int, int]], short_at: int | None = None):
     """构造按 Range 返回字节的 RequestUtils 假类。"""
 
@@ -344,3 +407,103 @@ def test_remove_without_delete_keeps_files(tmp_path):
         manager.shutdown()
     assert root.exists()
     assert (root / "a.bin").read_bytes() == b"payload"
+
+
+def test_aria2_success_updates_progress_and_cleans_saved(tmp_path, monkeypatch):
+    """aria2 成功链路使用 64 线程参数、轮询三种状态并清理转存副本。"""
+    monkeypatch.setattr(downloader_module, "ARIA2_POLL_INTERVAL", 0.0)
+    source = b"abcdefghij"
+    client = _Client(keep_saved=False)
+    rpc = _FakeAria2Rpc(size=len(source))
+    launcher = _FakeLauncher(rpc)
+    manager = DownloadManager(
+        tmp_path, lambda: client, aria2_launcher=launcher, aria2_connections=64, aria2_split=64,
+    )
+    task = _multi_task(tmp_path, count=2, size=len(source))
+    try:
+        manager.submit(task, "https://pan.quark.cn/s/abc", "1234")
+        finished = _wait(manager, task.hash, {STATE_COMPLETED, STATE_ERROR})
+        assert finished.state == STATE_COMPLETED
+        assert finished.done == 2 * len(source)
+        assert finished.speed == 0.0
+        assert [call[0] for call in rpc.add_calls] == [
+            "https://dl.example/file", "https://dl.example/file",
+        ]
+        for _url, options in rpc.add_calls:
+            assert options["dir"] == task.content_path
+            assert options["out"] in {"f0.bin", "f1.bin"}
+            assert options["split"] == "64"
+            assert options["max-connection-per-server"] == "64"
+            assert options["min-split-size"] == "1M"
+            assert options["continue"] == "true"
+            assert options["auto-file-renaming"] == "false"
+            assert "User-Agent: test" in options["header"]
+        assert sorted(rpc.counts.values()) == [3, 3]
+        assert client.save_calls and len(client.save_calls[0][2]) == 2
+        assert client.delete_calls == [["saved-fid-0", "saved-fid-1"]]
+    finally:
+        manager.shutdown()
+    assert launcher.stop_calls == 1
+
+
+def test_aria2_unavailable_falls_back_to_chunks(tmp_path, monkeypatch):
+    """aria2 RPC 不可用时自动回落到内置分片下载。"""
+    source = b"abcdefghij"
+    calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(downloader_module, "CHUNK_SIZE", 4)
+    monkeypatch.setattr(downloader_module, "RequestUtils", _range_utils(source, calls))
+    client = _Client()
+    rpc = _FakeAria2Rpc()
+    launcher = _FakeLauncher(rpc, available=False)
+    manager = DownloadManager(tmp_path, lambda: client, aria2_launcher=launcher)
+    task = _task(tmp_path, size=len(source))
+    try:
+        manager.submit(task, "https://pan.quark.cn/s/abc", "")
+        finished = _wait(manager, task.hash, {STATE_COMPLETED, STATE_ERROR})
+        assert finished.state == STATE_COMPLETED
+        assert (Path(task.content_path) / "a.bin").read_bytes() == source
+        assert rpc.add_calls == []
+        assert sorted(calls) == [(0, 3), (4, 7), (8, 9)]
+    finally:
+        manager.shutdown()
+
+
+def test_aria2_add_failure_falls_back_to_chunks(tmp_path, monkeypatch):
+    """aria2 addUri 失败时回落到内置分片下载。"""
+    source = b"abcdefghij"
+    calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(downloader_module, "CHUNK_SIZE", 4)
+    monkeypatch.setattr(downloader_module, "RequestUtils", _range_utils(source, calls))
+    client = _Client()
+    rpc = _FakeAria2Rpc(add_result=False)
+    launcher = _FakeLauncher(rpc)
+    manager = DownloadManager(tmp_path, lambda: client, aria2_launcher=launcher)
+    task = _task(tmp_path, size=len(source))
+    try:
+        manager.submit(task, "https://pan.quark.cn/s/abc", "")
+        finished = _wait(manager, task.hash, {STATE_COMPLETED, STATE_ERROR})
+        assert finished.state == STATE_COMPLETED
+        assert (Path(task.content_path) / "a.bin").read_bytes() == source
+        assert len(rpc.add_calls) == 1
+        assert sorted(calls) == [(0, 3), (4, 7), (8, 9)]
+    finally:
+        manager.shutdown()
+
+
+def test_aria2_error_marks_task_error(tmp_path, monkeypatch):
+    """aria2 返回 error 时任务失败，错误信息截断且移除 gid。"""
+    monkeypatch.setattr(downloader_module, "ARIA2_POLL_INTERVAL", 0.0)
+    client = _Client()
+    rpc = _FakeAria2Rpc(mode="error", error_message="x" * 300)
+    launcher = _FakeLauncher(rpc)
+    manager = DownloadManager(tmp_path, lambda: client, aria2_launcher=launcher)
+    task = _task(tmp_path, size=10)
+    try:
+        manager.submit(task, "https://pan.quark.cn/s/abc", "")
+        finished = _wait(manager, task.hash, {STATE_COMPLETED, STATE_ERROR})
+        assert finished.state == STATE_ERROR
+        assert "aria2 下载失败" in finished.error
+        assert len(finished.error) <= 200
+        assert rpc.removed == ["gid-1"]
+    finally:
+        manager.shutdown()

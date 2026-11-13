@@ -32,6 +32,7 @@ except ImportError:  # pragma: no cover - 兼容宿主结构调整
     from app.schemas import TorrentInfo
 from app.schemas.types import MediaType, SystemConfigKey, TorrentQueryStatus
 
+from .aria2 import Aria2Launcher
 from .downloader import (
     DownloadManager,
     DownloadTask,
@@ -70,7 +71,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.2.0"
+    plugin_version = "0.3.0"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -83,6 +84,7 @@ class QuarkChannel(_PluginBase):
     _manager: Optional[DownloadManager] = None
     _pansou: Optional[PansouSource] = None
     _secret: str = ""
+    _aria2_secret: str = ""
 
     # ---------- 生命周期 ----------
 
@@ -93,10 +95,32 @@ class QuarkChannel(_PluginBase):
         self._config = config
         data_dir = self.get_data_path()
         self._cache = TorrentCache(data_dir)
+        sign_secret = str(config.get("sign_secret") or "").strip()
+        aria2_secret = str(config.get("aria2_secret") or "").strip()
+        config_changed = False
+        if not sign_secret:
+            sign_secret = secrets.token_hex(16)
+            config["sign_secret"] = sign_secret
+            config_changed = True
+        if not aria2_secret:
+            aria2_secret = secrets.token_hex(16)
+            config["aria2_secret"] = aria2_secret
+            config_changed = True
+        if config_changed:
+            try:
+                self.update_config(config)
+            except Exception as error:  # noqa: BLE001 - 配置回写失败不应阻断启用
+                logger.warning(f"直链频道密钥回写失败：{error}")
+        self._secret = sign_secret
+        self._aria2_secret = aria2_secret
         self._manager = DownloadManager(
             data_dir,
             self._make_client,
             max_tasks=max(1, min(int(config.get("max_tasks") or 3), 6)),
+            aria2_enabled=bool(config.get("aria2_enabled", True)),
+            aria2_connections=max(1, min(int(config.get("aria2_connections") or 64), 128)),
+            aria2_split=max(1, min(int(config.get("aria2_split") or 64), 128)),
+            aria2_launcher=Aria2Launcher(data_dir, self._download_root(), aria2_secret),
         )
         self._pansou = PansouSource(
             str(config.get("pansou_url") or "").strip(),
@@ -105,15 +129,6 @@ class QuarkChannel(_PluginBase):
             password=str(config.get("pansou_password") or ""),
             timeout=max(5, min(int(config.get("pansou_timeout") or 20), 120)),
         )
-        secret = str(config.get("sign_secret") or "").strip()
-        if not secret:
-            secret = secrets.token_hex(16)
-            config["sign_secret"] = secret
-            try:
-                self.update_config(config)
-            except Exception as error:  # noqa: BLE001 - 配置回写失败不应阻断启用
-                logger.warning(f"直链频道签名密钥回写失败：{error}")
-        self._secret = secret
         if self._enabled:
             self._ensure_downloader_entry()
         logger.info(
@@ -347,6 +362,55 @@ class QuarkChannel(_PluginBase):
                         ],
                     },
                     {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "aria2_enabled",
+                                            "label": "启用 aria2 下载",
+                                            "hint": "不可用时自动回落到内置分片下载",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "aria2_connections",
+                                            "label": "aria2 连接数",
+                                            "type": "number",
+                                            "placeholder": "64",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "aria2_split",
+                                            "label": "aria2 分片数",
+                                            "type": "number",
+                                            "placeholder": "64",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
                         "component": "VSwitch",
                         "props": {
                             "model": "keep_saved",
@@ -375,6 +439,9 @@ class QuarkChannel(_PluginBase):
             "mp_base_url": "http://127.0.0.1:3000",
             "quark_cookie": "",
             "download_root": "/downloads",
+            "aria2_enabled": True,
+            "aria2_connections": 64,
+            "aria2_split": 64,
             "keep_saved": False,
             "downloader_name": "网盘直链",
             "keyword_whitelist": "",
