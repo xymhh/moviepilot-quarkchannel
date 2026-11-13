@@ -13,8 +13,14 @@ from typing import Any, Optional
 from app.sdk.logging import logger
 from app.sdk.network import RequestUtils
 
-# 与生产可用实现保持一致：接口与下载统一使用浏览器 UA，
-# 换链与下载的 UA 不一致会被 CDN 拒绝（403）。
+# 夸克按 UA 区分「游客 / 客户端 / 网页」三档：换链与下载必须使用同一 UA，
+# 客户端 UA 可以绕过网页端的单文件大小限制（download file size limit）。
+CLIENT_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) quark-cloud-drive/2.5.20 Chrome/100.0.4896.160 "
+    "Electron/18.3.5.4-b478491100 Safari/537.36 Channel/pckk_other_ch"
+)
+CLIENT_PARAMS = {"sys": "win32", "ve": "2.5.20", "ut": "", "guid": ""}
 PC_UA = (
     "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/94.0.4606.71 Safari/537.36 "
@@ -83,10 +89,15 @@ class QuarkShareClient:
         self._folder_fid: Optional[str] = None
         self._request = RequestUtils()
 
-    def _headers(self, referer: str = "https://pan.quark.cn/") -> dict[str, str]:
-        """构造统一请求头。"""
+    def _headers(self, referer: str = "https://pan.quark.cn/",
+                 user_agent: str = "") -> dict[str, str]:
+        """构造统一请求头。
+
+        :param referer: Referer 头
+        :param user_agent: 覆盖 UA，用于切换游客/客户端通道
+        """
         headers = {
-            "User-Agent": PC_UA,
+            "User-Agent": user_agent or PC_UA,
             "Referer": referer,
             "Origin": "https://pan.quark.cn",
             "Accept": "application/json, text/plain, */*",
@@ -108,7 +119,8 @@ class QuarkShareClient:
         return payload if isinstance(payload, dict) else {}
 
     def _call(self, host: str, method: str, path: str, *, params: dict,
-              payload: Optional[dict] = None, timeout: int = 20) -> dict:
+              payload: Optional[dict] = None, timeout: int = 20,
+              user_agent: str = "") -> dict:
         """向指定域名发起一次接口调用，失败返回空字典。
 
         :param host: 接口域名（HOST_PAGE / HOST_SAVE / HOST_PC）
@@ -117,6 +129,7 @@ class QuarkShareClient:
         :param params: 查询参数
         :param payload: JSON 请求体
         :param timeout: 超时秒数
+        :param user_agent: 覆盖 UA，空值使用默认浏览器 UA
         :return: 响应 JSON；异常或非 JSON 时返回空字典
         """
         url = f"{host}{path}"
@@ -124,11 +137,13 @@ class QuarkShareClient:
         try:
             if method == "GET":
                 response = self._request.get_res(
-                    url, params=merged, headers=self._headers(), timeout=timeout,
+                    url, params=merged, headers=self._headers(user_agent=user_agent),
+                    timeout=timeout,
                 )
             else:
                 response = self._request.post_res(
-                    url, params=merged, json=payload or {}, headers=self._headers(), timeout=timeout,
+                    url, params=merged, json=payload or {},
+                    headers=self._headers(user_agent=user_agent), timeout=timeout,
                 )
         except Exception as error:  # noqa: BLE001 - 网络异常按失败处理
             logger.debug(f"夸克接口 {path} 请求异常：{error}")
@@ -372,8 +387,10 @@ class QuarkShareClient:
             fid = str(row.get("fid") or "")
             if name and fid:
                 available.setdefault(name, []).append(fid)
+        rows = self._folder_rows(self._folder_fid or "")
         logger.info(
-            f"转存目录现有文件：{[row.get('file_name') for row in self._folder_rows(self._folder_fid or '')][:20]}"
+            f"转存目录 fid={self._folder_fid} 条目={len(rows)} "
+            f"名称={[row.get('file_name') for row in rows][:10]}"
         )
         result: list[str] = []
         for name in names:
@@ -420,6 +437,11 @@ class QuarkShareClient:
             batch_saved = self._extract_top_fids(data)
             if task_id:
                 task_data = self._wait_task(task_id)
+                task_body = task_data.get("data") if isinstance(task_data.get("data"), dict) else {}
+                logger.info(
+                    f"转存任务完成：键={sorted(task_body.keys())} "
+                    f"fid数={len(self._extract_top_fids(task_data))}"
+                )
                 batch_saved = self._extract_top_fids(task_data) or batch_saved
             if len(batch_saved) != len(batch):
                 logger.info(
@@ -436,17 +458,37 @@ class QuarkShareClient:
         :param fid: 转存后的文件 fid
         :return: (下载地址, 需要携带的请求头)
         """
-        data = self._call(
-            HOST_PC, "POST", "/1/clouddrive/file/download", params={}, payload={"fids": [fid]},
+        data: dict = {}
+        url = ""
+        used_ua = CLIENT_UA
+        attempts: list[tuple[str, str, dict, str]] = (
+            # 与生产可用实现完全一致的通道顺序：先 PC 域名无附加参数，
+            # 再造客户端参数走 share 域名，最后退回网页 UA。
+            ("drive-pc/PC-UA", HOST_PC, {}, CLIENT_UA),
+            ("drive/PC-UA", HOST_SAVE, dict(CLIENT_PARAMS), CLIENT_UA),
+            ("drive/网页-UA", HOST_SAVE, dict(CLIENT_PARAMS), PC_UA),
         )
-        rows = data.get("data")
-        entry = rows[0] if isinstance(rows, list) and rows else {}
-        url = str((entry or {}).get("download_url") or "")
+        for channel, host, params, candidate_ua in attempts:
+            data = self._call(
+                host, "POST", "/1/clouddrive/file/download", params=params,
+                payload={"fids": [fid]}, user_agent=candidate_ua,
+            )
+            rows = data.get("data")
+            entry = rows[0] if isinstance(rows, list) and rows else {}
+            url = str((entry or {}).get("download_url") or "")
+            if url:
+                used_ua = candidate_ua
+                logger.info(f"夸克取链成功：{channel}")
+                break
+            logger.info(
+                f"夸克取链通道 {channel} 未返回地址："
+                f"code={data.get('code')} {data.get('message') or ''}".strip()
+            )
         if not url:
             message = str(data.get("message") or "")
             raise ValueError(f"夸克未返回下载地址：{message or '未知原因'}")
         headers = {
-            "User-Agent": PC_UA,
+            "User-Agent": used_ua,
             "Referer": "https://pan.quark.cn/",
             "Origin": "https://pan.quark.cn",
             "Accept": "*/*",

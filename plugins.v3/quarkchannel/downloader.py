@@ -56,6 +56,8 @@ class DownloadTask:
     state: str = STATE_DOWNLOADING
     error: str = ""
     files: list[TaskFile] = field(default_factory=list)
+    share_url: str = ""
+    passcode: str = ""
     created_at: float = 0.0
     updated_at: float = 0.0
     speed: float = 0.0
@@ -155,6 +157,9 @@ class DownloadManager:
             task.created_at = task.created_at or time.time()
             task.updated_at = time.time()
             task.state = STATE_DOWNLOADING
+            # 分享地址与提取码随任务落盘，插件重载后仍能续传
+            task.share_url = share_url
+            task.passcode = passcode
             task.total = sum(item.size for item in task.files)
             task.done = sum(item.done for item in task.files)
             self._tasks[task.hash] = task
@@ -242,8 +247,8 @@ class DownloadManager:
         """在 worker 线程中顺序下载各文件，整任务只转存一次。"""
         task = self.get(task_hash)
         event = self._stops.get(task_hash)
-        share_url = self._share_urls.get(task_hash, "")
-        passcode = self._passcodes.get(task_hash, "")
+        share_url = (task.share_url if task else "") or self._share_urls.get(task_hash, "")
+        passcode = (task.passcode if task else "") or self._passcodes.get(task_hash, "")
         if not task or not event:
             return
         client = self._client_factory()

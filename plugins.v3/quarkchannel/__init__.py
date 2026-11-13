@@ -41,7 +41,7 @@ from .downloader import (
     STATE_STOPPED,
     TaskFile,
 )
-from .shares.quark import QuarkShareClient
+from .shares.quark import QuarkShareClient, extract_pwd_id
 from .sources.pansou import PansouSource, normalize_share_url
 from .torrents import (
     ShareEntry,
@@ -161,6 +161,13 @@ class QuarkChannel(_PluginBase):
                 "methods": ["GET"],
                 "auth": "bear",
                 "summary": "查看任务与缓存状态",
+            },
+            {
+                "path": "/selftest",
+                "endpoint": self.api_selftest,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "按分享链路自检：快照→转存→取链（排障用）",
             },
             {
                 "path": "/probe",
@@ -660,6 +667,57 @@ class QuarkChannel(_PluginBase):
                 ],
             },
         }
+
+    def api_selftest(self, payload: Optional[dict] = None) -> dict:
+        """按真实链路自检一条分享：快照 → 转存 → 取链，不下正文。
+
+        :param payload: {"share_url": "...", "passcode": "", "file_index": 0}
+        :return: 各步结果
+        """
+        payload = payload or {}
+        share_url = str(payload.get("share_url") or "").strip()
+        passcode = str(payload.get("passcode") or "").strip()
+        index = int(payload.get("file_index") or 0)
+        if not share_url:
+            return {"success": False, "message": "缺少 share_url"}
+        steps: dict = {}
+        client = self._make_client()
+        pwd_id = extract_pwd_id(share_url)
+        token = client.stoken(pwd_id, passcode)
+        steps["stoken"] = bool(token)
+        if not token:
+            return {"success": False, "steps": steps, "message": "分享不可用或提取码错误"}
+        try:
+            # 必须复用同一个 stoken：share_fid_token 与 stoken 绑定
+            snapshot = client.snapshot(share_url, passcode, token=token)
+            steps["snapshot"] = {"files": len(snapshot.files), "size": snapshot.total_size,
+                                 "title": snapshot.title}
+        except Exception as error:  # noqa: BLE001 - 自检需要返回失败原因
+            return {"success": False, "steps": steps, "message": f"读取分享失败：{error}"}
+        if not snapshot.files:
+            return {"success": False, "steps": steps, "message": "分享内没有文件"}
+        target = snapshot.files[min(index, len(snapshot.files) - 1)]
+        steps["file"] = {"name": target.name, "size": target.size, "fid": target.fid}
+        try:
+            saved = client.save_files(pwd_id, token, [target])
+            steps["save"] = len(saved)
+        except Exception as error:  # noqa: BLE001 - 自检需要返回失败原因
+            return {"success": False, "steps": steps, "message": f"转存失败：{error}"}
+        if not saved:
+            return {"success": False, "steps": steps, "message": "转存未返回 fid"}
+        try:
+            url, headers = client.download_url_by_fid(saved[0])
+            steps["link"] = {"ok": True, "host": url.split("/")[2], "ua": headers.get("User-Agent", "")[:40]}
+            result = {"success": True, "steps": steps}
+        except Exception as error:  # noqa: BLE001 - 自检需要返回失败原因
+            steps["link"] = {"ok": False}
+            result = {"success": False, "steps": steps, "message": f"取链失败：{error}"}
+        try:
+            client.delete_files(saved)
+            steps["cleanup"] = True
+        except Exception:  # noqa: BLE001 - 清理失败不影响结论
+            steps["cleanup"] = False
+        return result
 
     def api_probe(self, payload: Optional[dict] = None) -> dict:
         """按关键词跑一遍取链流程，返回候选与文件数（不下载）。
