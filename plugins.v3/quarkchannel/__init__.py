@@ -72,7 +72,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.6.0"
+    plugin_version = "0.6.1"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -261,416 +261,169 @@ class QuarkChannel(_PluginBase):
         ]
 
     def get_form(self) -> tuple[list[dict], dict[str, Any]]:
-        """返回配置页面与默认值。"""
-        return [
-            {
-                "component": "VForm",
-                "content": [
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "model": "enabled",
-                                            "label": "启用插件",
-                                            "hint": "启用后本插件才会参与搜索与下载",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "model": "only_whitelist",
-                                            "label": "仅白名单关键词生效",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "max_tasks",
-                                            "label": "并发下载任务数",
-                                            "type": "number",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "pansou_url",
-                                            "label": "盘搜服务地址",
-                                            "placeholder": "http://pansou:8888",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 8},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "pansou_token",
-                                            "label": "盘搜访问令牌（可选）",
-                                            "type": "password",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "pansou_user",
-                                            "label": "盘搜账号",
-                                            "hint": "开启鉴权时填写，插件自动登录换取令牌",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "pansou_password",
-                                            "label": "盘搜密码",
-                                            "type": "password",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "mp_base_url",
-                                            "label": "MoviePilot 内部地址",
-                                            "placeholder": "http://127.0.0.1:3000",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "quark_cookie",
-                                            "label": "夸克 Cookie（可选）",
-                                            "type": "password",
-                                            "hint": "填写后可降低匿名请求被限的概率",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "download_root",
-                                            "label": "下载根目录",
-                                            "placeholder": "/downloads",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "model": "aria2_enabled",
-                                            "label": "启用 aria2 下载",
-                                            "hint": "不可用时自动回落到内置分片下载",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "aria2_connections",
-                                            "label": "aria2 连接数",
-                                            "type": "number",
-                                            "placeholder": "64",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "aria2_split",
-                                            "label": "aria2 分片数",
-                                            "type": "number",
-                                            "placeholder": "64",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "model": "tg_enabled",
-                                            "label": "启用 Telegram 频道监控",
-                                            "hint": "新消息写入本地增量索引，搜索时优先命中",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "tg_api_id",
-                                            "label": "TG api_id",
-                                            "type": "number",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "tg_scan_limit",
-                                            "label": "单频道扫描条数",
-                                            "type": "number",
-                                            "placeholder": "100",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "tg_interval_minutes",
-                                            "label": "轮询间隔（分钟）",
-                                            "type": "number",
-                                            "placeholder": "10",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "tg_api_hash",
-                                            "label": "TG api_hash",
-                                            "type": "password",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 8},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "tg_session",
-                                            "label": "TG StringSession",
-                                            "type": "password",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VTextField",
-                        "props": {
-                            "model": "tg_channels",
-                            "label": "Telegram 频道",
-                            "placeholder": "多个频道用英文逗号分隔，例如 @channel1,@channel2",
-                        },
-                    },
-                    {
-                        "component": "VSwitch",
-                        "props": {
-                            "model": "keep_saved",
-                            "label": "下载后保留网盘副本",
-                            "hint": "关闭时下载成功后清理转存副本，失败时保留便于重试",
-                        },
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VSelect",
-                                        "props": {
-                                            "model": "pansou_src",
-                                            "label": "盘搜来源",
-                                            "items": [
-                                                {"title": "全部来源", "value": "all"},
-                                                {"title": "仅 TG 频道", "value": "tg"},
-                                                {"title": "仅插件源", "value": "plugin"},
-                                            ],
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "pansou_plugins",
-                                            "label": "指定盘搜插件（逗号分隔，空=全部）",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "pansou_cloud_types",
-                                            "label": "网盘类型（逗号分隔）",
-                                            "placeholder": "quark,115",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VTextField",
-                        "props": {
-                            "model": "keyword_whitelist",
-                            "label": "关键词白名单",
-                            "placeholder": "多个关键词用英文逗号分隔",
-                        },
-                    },
-                ],
+        """返回配置页面与默认值：按渠道分卡片，用选项卡切换。"""
+
+        def field(model: str, label: str, *, kind: str = "text", hint: str = "",
+                  placeholder: str = "", cols: int = 6, items: list | None = None) -> dict:
+            """生成一个配置控件。
+
+            :param model: 配置键
+            :param label: 显示名
+            :param kind: text / password / number / switch / select
+            :param hint: 说明文字
+            :param placeholder: 占位提示
+            :param cols: 栅格宽度
+            :param items: select 选项
+            :return: Vuetify JSON 片段
+            """
+            props: dict[str, Any] = {"model": model, "label": label}
+            if kind == "switch":
+                if hint:
+                    props["hint"] = hint
+                component = "VSwitch"
+            else:
+                if hint:
+                    props["hint"] = hint
+                if placeholder:
+                    props["placeholder"] = placeholder
+                if kind == "password":
+                    props["type"] = "password"
+                elif kind == "number":
+                    props["type"] = "number"
+                if kind == "select":
+                    component = "VSelect"
+                    props["items"] = items or []
+                else:
+                    component = "VTextField"
+            return {
+                "component": "VCol",
+                "props": {"cols": 12, "md": cols},
+                "content": [{"component": component, "props": props}],
             }
-        ], {
+
+        def card(title: str, fields: list[dict], subtitle: str = "") -> dict:
+            """把一组控件包成一张卡片。
+
+            :param title: 卡片标题
+            :param fields: 控件列表
+            :param subtitle: 卡片副标题
+            :return: 卡片片段
+            """
+            header: dict[str, Any] = {"component": "VCardTitle", "text": title}
+            content: list[dict] = [header]
+            if subtitle:
+                content.append({"component": "VCardSubtitle", "text": subtitle})
+            content.append({"component": "VCardText", "props": {"class": "pt-2"},
+                            "content": [{"component": "VRow", "content": fields}]})
+            return {"component": "VCard", "props": {"variant": "tonal", "class": "mb-4"},
+                    "content": content}
+
+        def tab(value: str, text: str) -> dict:
+            """生成一个选项卡标签。"""
+            return {"component": "VTab", "props": {"value": value}, "text": text}
+
+        def panel(value: str, *cards: dict) -> dict:
+            """生成一个选项卡面板。"""
+            return {"component": "VWindowItem", "props": {"value": value},
+                    "content": list(cards)}
+
+        basic = card("基础", [
+            field("enabled", "启用插件", kind="switch", cols=4,
+                  hint="关闭后不参与搜索，MoviePilot 回到原生 BT/PT"),
+            field("downloader_name", "下载器名称", cols=4,
+                  hint="下载页里显示的标签名"),
+            field("download_root", "下载根目录", cols=4, placeholder="/downloads"),
+            field("max_tasks", "并发下载任务数", kind="number", cols=4),
+            field("only_whitelist", "仅白名单关键词生效", kind="switch", cols=4),
+            field("keyword_whitelist", "关键词白名单", cols=4,
+                  placeholder="多个关键词用英文逗号分隔"),
+        ])
+
+        pansou = card("盘搜", [
+            field("pansou_url", "服务地址", cols=6, placeholder="http://pansou:8888"),
+            field("pansou_src", "搜索来源", kind="select", cols=6, items=[
+                {"title": "全部来源", "value": "all"},
+                {"title": "仅 TG 频道", "value": "tg"},
+                {"title": "仅插件源", "value": "plugin"},
+            ]),
+            field("pansou_user", "账号", cols=6, hint="开启鉴权时填写，插件自动登录换令牌"),
+            field("pansou_password", "密码", kind="password", cols=6),
+            field("pansou_token", "访问令牌（可选）", kind="password", cols=6),
+            field("pansou_plugins", "指定插件", cols=6,
+                  placeholder="逗号分隔，留空表示全部"),
+            field("pansou_cloud_types", "网盘类型", cols=12, placeholder="quark,115"),
+        ], subtitle="关键词搜索源，兜底全量资源")
+
+        tg = card("Telegram 频道", [
+            field("tg_enabled", "启用频道监控", kind="switch", cols=4,
+                  hint="按频道游标增量拉取，用于追更"),
+            field("tg_api_id", "api_id", cols=4),
+            field("tg_api_hash", "api_hash", kind="password", cols=4),
+            field("tg_session", "StringSession", kind="password", cols=12,
+                  hint="Telethon 会话串，与 api_id/api_hash 配套"),
+            field("tg_channels", "频道列表", cols=12,
+                  placeholder="https://t.me/xxx,https://t.me/yyy"),
+            field("tg_interval_minutes", "轮询间隔（分钟）", kind="number", cols=4),
+            field("tg_scan_limit", "单次扫描条数", kind="number", cols=4),
+            field("tg_backfill", "首次接入回补历史", kind="switch", cols=4,
+                  hint="开启后首次扫描会把最近消息也建入索引"),
+        ], subtitle="增量索引优先参与搜索，实现追更")
+
+        download = card("下载", [
+            field("aria2_enabled", "启用 aria2", kind="switch", cols=4,
+                  hint="使用容器内置 aria2c 多线程下载"),
+            field("aria2_connections", "连接数", kind="number", cols=4),
+            field("aria2_split", "分片数", kind="number", cols=4),
+            field("keep_saved", "保留网盘副本", kind="switch", cols=12,
+                  hint="关闭时下载成功后清理转存副本，失败时保留"),
+        ], subtitle="aria2 不可用时自动回落到内置分片下载")
+
+        advanced = card("高级", [
+            field("mp_base_url", "MoviePilot 内部地址", cols=6,
+                  placeholder="http://127.0.0.1:3000",
+                  hint="插件生成合成种子 URL 用，MoviePilot 会自己来拉"),
+        ], subtitle="一般不需要修改")
+
+        tabs = {"component": "VTabs", "props": {"model": "active_tab", "density": "comfortable"},
+                "content": [
+                    tab("basic", "基础"), tab("pansou", "盘搜"), tab("tg", "Telegram 频道"),
+                    tab("download", "下载"), tab("advanced", "高级"),
+                ]}
+        window = {"component": "VWindow", "props": {"model": "active_tab"},
+                  "content": [
+                      panel("basic", basic), panel("pansou", pansou), panel("tg", tg),
+                      panel("download", download), panel("advanced", advanced),
+                  ]}
+        defaults = {
+            "active_tab": "basic",
             "enabled": False,
-            "only_whitelist": False,
+            "downloader_name": "网盘直链",
+            "download_root": "/downloads",
             "max_tasks": 3,
+            "only_whitelist": False,
+            "keyword_whitelist": "",
             "pansou_url": "",
-            "pansou_token": "",
+            "pansou_src": "all",
             "pansou_user": "",
             "pansou_password": "",
-            "pansou_src": "all",
+            "pansou_token": "",
             "pansou_plugins": "",
             "pansou_cloud_types": "quark",
-            "mp_base_url": "http://127.0.0.1:3000",
-            "quark_cookie": "",
-            "download_root": "/downloads",
-            "aria2_enabled": True,
-            "aria2_connections": 64,
-            "aria2_split": 64,
             "tg_enabled": False,
             "tg_api_id": "",
             "tg_api_hash": "",
             "tg_session": "",
             "tg_channels": "",
-            "tg_scan_limit": 100,
             "tg_interval_minutes": 10,
+            "tg_scan_limit": 100,
             "tg_backfill": False,
+            "aria2_enabled": True,
+            "aria2_connections": 64,
+            "aria2_split": 64,
             "keep_saved": False,
-            "downloader_name": "网盘直链",
-            "keyword_whitelist": "",
+            "mp_base_url": "http://127.0.0.1:3000",
         }
+        return [{"component": "VForm", "content": [tabs, window]}], defaults
 
     def get_page(self) -> Optional[list[dict]]:
         """返回插件详情页；插件尚未初始化时按空任务展示。"""
