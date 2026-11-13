@@ -72,7 +72,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.6.1"
+    plugin_version = "0.6.2"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -148,9 +148,13 @@ class QuarkChannel(_PluginBase):
             else:
                 api_hash = str(config.get("tg_api_hash") or "").strip()
                 session = str(config.get("tg_session") or "").strip()
-                raw_channels = str(config.get("tg_channels") or "")
+                raw_channels = config.get("tg_channels") or []
+                if isinstance(raw_channels, str):
+                    raw_items = re.split(r"[,，\n]+", raw_channels)
+                else:
+                    raw_items = [str(item) for item in raw_channels]
                 channels = list(dict.fromkeys(
-                    item.strip() for item in re.split(r"[,，\n]+", raw_channels) if item.strip()
+                    item.strip() for item in raw_items if str(item).strip()
                 ))
                 if api_id and api_hash and session and channels:
                     try:
@@ -293,6 +297,15 @@ class QuarkChannel(_PluginBase):
                 if kind == "select":
                     component = "VSelect"
                     props["items"] = items or []
+                elif kind == "chips":
+                    component = "VCombobox"
+                    props.update({
+                        "multiple": True,
+                        "chips": True,
+                        "closable-chips": True,
+                        "clearable": True,
+                        "variant": "outlined",
+                    })
                 else:
                     component = "VTextField"
             return {
@@ -322,10 +335,19 @@ class QuarkChannel(_PluginBase):
             """生成一个选项卡标签。"""
             return {"component": "VTab", "props": {"value": value}, "text": text}
 
-        def panel(value: str, *cards: dict) -> dict:
-            """生成一个选项卡面板。"""
-            return {"component": "VWindowItem", "props": {"value": value},
-                    "content": list(cards)}
+        def panel(value: str, *blocks: Any) -> dict:
+            """生成一个选项卡面板。
+
+            :param value: 选项卡值
+            :param blocks: 卡片或卡片列表
+            """
+            flat: list[dict] = []
+            for block in blocks:
+                if isinstance(block, (list, tuple)):
+                    flat.extend(block)
+                else:
+                    flat.append(block)
+            return {"component": "VWindowItem", "props": {"value": value}, "content": flat}
 
         basic = card("基础", [
             field("enabled", "启用插件", kind="switch", cols=4,
@@ -354,20 +376,29 @@ class QuarkChannel(_PluginBase):
             field("pansou_cloud_types", "网盘类型", cols=12, placeholder="quark,115"),
         ], subtitle="关键词搜索源，兜底全量资源")
 
-        tg = card("Telegram 频道", [
-            field("tg_enabled", "启用频道监控", kind="switch", cols=4,
-                  hint="按频道游标增量拉取，用于追更"),
-            field("tg_api_id", "api_id", cols=4),
-            field("tg_api_hash", "api_hash", kind="password", cols=4),
+        tg_switch = card("监控开关", [
+            field("tg_enabled", "启用频道监控", kind="switch", cols=12,
+                  hint="按频道游标增量拉取，新消息进本地索引，用于追更"),
+        ], subtitle="关闭后仅保留盘搜，索引不再更新")
+
+        tg_account = card("账号凭据", [
+            field("tg_api_id", "api_id", cols=6, placeholder="例如 12345678"),
+            field("tg_api_hash", "api_hash", kind="password", cols=6),
             field("tg_session", "StringSession", kind="password", cols=12,
-                  hint="Telethon 会话串，与 api_id/api_hash 配套"),
-            field("tg_channels", "频道列表", cols=12,
-                  placeholder="https://t.me/xxx,https://t.me/yyy"),
+                  hint="与 api_id/api_hash 配套；不会展示在日志里"),
+        ], subtitle="Telethon 用户会话才能读私有频道")
+
+        tg_channels_card = card("监控频道", [
+            field("tg_channels", "频道列表", kind="chips", cols=12,
+                  placeholder="输入 @频道名 或 https://t.me/xxx 后回车",
+                  hint="支持 @name、t.me 链接、邀请链接；回车添加，点 × 删除"),
             field("tg_interval_minutes", "轮询间隔（分钟）", kind="number", cols=4),
             field("tg_scan_limit", "单次扫描条数", kind="number", cols=4),
             field("tg_backfill", "首次接入回补历史", kind="switch", cols=4,
-                  hint="开启后首次扫描会把最近消息也建入索引"),
-        ], subtitle="增量索引优先参与搜索，实现追更")
+                  hint="把最近消息也建入索引"),
+        ], subtitle="每个频道各自维护游标，互不影响")
+
+        tg = [tg_switch, tg_account, tg_channels_card]
 
         download = card("下载", [
             field("aria2_enabled", "启用 aria2", kind="switch", cols=4,
@@ -413,7 +444,7 @@ class QuarkChannel(_PluginBase):
             "tg_api_id": "",
             "tg_api_hash": "",
             "tg_session": "",
-            "tg_channels": "",
+            "tg_channels": [],
             "tg_interval_minutes": 10,
             "tg_scan_limit": 100,
             "tg_backfill": False,
