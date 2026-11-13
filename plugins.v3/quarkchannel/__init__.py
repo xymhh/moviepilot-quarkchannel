@@ -72,7 +72,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.6.3"
+    plugin_version = "0.6.4"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -148,17 +148,17 @@ class QuarkChannel(_PluginBase):
             else:
                 api_hash = str(config.get("tg_api_hash") or "").strip()
                 session = str(config.get("tg_session") or "").strip()
-                raw_channels = config.get("tg_channels") or []
-                if isinstance(raw_channels, str):
-                    # 兼容旧配置：字符串转列表并回写，让 chips 输入框能正确展示
-                    raw_channels = [item.strip() for item in re.split(r"[,，\n]+", raw_channels) if item.strip()]
+                raw_channels = config.get("tg_channels") or ""
+                if isinstance(raw_channels, (list, tuple)):
+                    # 兼容上一版的列表配置：转成多行文本便于在手机端编辑
+                    raw_channels = "\n".join(str(item) for item in raw_channels)
                     config["tg_channels"] = raw_channels
                     try:
                         self.update_config(config)
                     except Exception:  # noqa: BLE001 - 迁移失败不影响启动
                         pass
                 if isinstance(raw_channels, str):
-                    raw_items = re.split(r"[,，\n]+", raw_channels)
+                    raw_items = re.split(r"[,，\n|]+", raw_channels)
                 else:
                     raw_items = [str(item) for item in raw_channels]
                 channels = list(dict.fromkeys(
@@ -310,14 +310,13 @@ class QuarkChannel(_PluginBase):
                 if kind == "select":
                     component = "VSelect"
                     props["items"] = items or []
-                elif kind == "chips":
-                    component = "VCombobox"
+                elif kind == "textarea":
+                    component = "VTextarea"
                     props.update({
-                        "multiple": True,
-                        "chips": True,
-                        "closable-chips": True,
-                        "clearable": True,
+                        "rows": 4,
+                        "auto-grow": True,
                         "variant": "outlined",
+                        "class": "text-body-2",
                     })
                 else:
                     component = "VTextField"
@@ -413,9 +412,9 @@ class QuarkChannel(_PluginBase):
         ], subtitle="Telethon 用户会话才能读私有频道")
 
         tg_channels_card = card("监控频道", [
-            field("tg_channels", "频道列表", kind="chips", cols=12,
-                  placeholder="输入 @频道名 或 https://t.me/xxx 后回车",
-                  hint="支持 @name、t.me 链接、邀请链接；回车添加，点 × 删除"),
+            field("tg_channels", "频道列表", kind="textarea", cols=12,
+                  placeholder="@channel\nhttps://t.me/xxxxx\nhttps://t.me/+invite",
+                  hint="每行一个，支持 @name、t.me 链接、邀请链接；竖线/逗号分隔也能识别"),
             field("tg_interval_minutes", "轮询间隔（分钟）", kind="number", cols=4),
             field("tg_scan_limit", "单次扫描条数", kind="number", cols=4),
             field("tg_backfill", "首次接入回补历史", kind="switch", cols=4,
@@ -479,7 +478,7 @@ class QuarkChannel(_PluginBase):
             "tg_api_id": "",
             "tg_api_hash": "",
             "tg_session": "",
-            "tg_channels": [],
+            "tg_channels": "",
             "tg_interval_minutes": 10,
             "tg_scan_limit": 100,
             "tg_backfill": False,
