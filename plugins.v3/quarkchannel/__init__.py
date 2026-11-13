@@ -72,7 +72,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.6.2"
+    plugin_version = "0.6.3"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -149,6 +149,14 @@ class QuarkChannel(_PluginBase):
                 api_hash = str(config.get("tg_api_hash") or "").strip()
                 session = str(config.get("tg_session") or "").strip()
                 raw_channels = config.get("tg_channels") or []
+                if isinstance(raw_channels, str):
+                    # 兼容旧配置：字符串转列表并回写，让 chips 输入框能正确展示
+                    raw_channels = [item.strip() for item in re.split(r"[,，\n]+", raw_channels) if item.strip()]
+                    config["tg_channels"] = raw_channels
+                    try:
+                        self.update_config(config)
+                    except Exception:  # noqa: BLE001 - 迁移失败不影响启动
+                        pass
                 if isinstance(raw_channels, str):
                     raw_items = re.split(r"[,，\n]+", raw_channels)
                 else:
@@ -280,7 +288,11 @@ class QuarkChannel(_PluginBase):
             :param items: select 选项
             :return: Vuetify JSON 片段
             """
-            props: dict[str, Any] = {"model": model, "label": label}
+            props: dict[str, Any] = {
+                "model": model,
+                "label": label,
+                "hide-details": "auto",
+            }
             if kind == "switch":
                 if hint:
                     props["hint"] = hint
@@ -294,6 +306,7 @@ class QuarkChannel(_PluginBase):
                     props["type"] = "password"
                 elif kind == "number":
                     props["type"] = "number"
+                    props["inputmode"] = "numeric"
                 if kind == "select":
                     component = "VSelect"
                     props["items"] = items or []
@@ -322,13 +335,24 @@ class QuarkChannel(_PluginBase):
             :param subtitle: 卡片副标题
             :return: 卡片片段
             """
-            header: dict[str, Any] = {"component": "VCardTitle", "text": title}
+            header: dict[str, Any] = {
+                "component": "VCardTitle",
+                "props": {"class": "text-subtitle-1 py-3"},
+                "text": title,
+            }
             content: list[dict] = [header]
             if subtitle:
-                content.append({"component": "VCardSubtitle", "text": subtitle})
-            content.append({"component": "VCardText", "props": {"class": "pt-2"},
-                            "content": [{"component": "VRow", "content": fields}]})
-            return {"component": "VCard", "props": {"variant": "tonal", "class": "mb-4"},
+                content.append({
+                    "component": "VCardSubtitle",
+                    "props": {"class": "text-caption text-medium-emphasis pt-0"},
+                    "text": subtitle,
+                })
+            content.append({
+                "component": "VCardText",
+                "props": {"class": "pt-1 px-3 pb-3"},
+                "content": [{"component": "VRow", "props": {"dense": True}, "content": fields}],
+            })
+            return {"component": "VCard", "props": {"variant": "outlined", "class": "mb-3"},
                     "content": content}
 
         def tab(value: str, text: str) -> dict:
@@ -415,12 +439,23 @@ class QuarkChannel(_PluginBase):
                   hint="插件生成合成种子 URL 用，MoviePilot 会自己来拉"),
         ], subtitle="一般不需要修改")
 
-        tabs = {"component": "VTabs", "props": {"model": "active_tab", "density": "comfortable"},
-                "content": [
-                    tab("basic", "基础"), tab("pansou", "盘搜"), tab("tg", "Telegram 频道"),
-                    tab("download", "下载"), tab("advanced", "高级"),
-                ]}
-        window = {"component": "VWindow", "props": {"model": "active_tab"},
+        # 移动端：选项卡可横向滚动（show-arrows），标签保持 2-3 字避免换行
+        tabs = {
+            "component": "VTabs",
+            "props": {
+                "model": "active_tab",
+                "density": "compact",
+                "show-arrows": True,
+                "align-tabs": "start",
+                "grow": False,
+                "class": "mb-2",
+            },
+            "content": [
+                tab("basic", "基础"), tab("pansou", "盘搜"), tab("tg", "频道"),
+                tab("download", "下载"), tab("advanced", "高级"),
+            ],
+        }
+        window = {"component": "VWindow", "props": {"model": "active_tab", "eager": True},
                   "content": [
                       panel("basic", basic), panel("pansou", pansou), panel("tg", tg),
                       panel("download", download), panel("advanced", advanced),
