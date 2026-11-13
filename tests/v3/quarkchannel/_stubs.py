@@ -139,6 +139,7 @@ def _install_stubs() -> None:
     sdk.plugin = plugin_module
 
     schemas = _module("app.schemas")
+    schemas.DOWNLOAD_TASK_ALREADY_EXISTS = "下载任务已存在"
     schemas.TorrentInfo = _TorrentInfo
     schemas.DownloaderTorrent = _DownloaderTorrent
     schemas.DownloaderFile = _DownloaderFile

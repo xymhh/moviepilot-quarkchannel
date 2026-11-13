@@ -20,7 +20,12 @@ from fastapi.responses import Response
 
 from app.sdk.logging import logger
 from app.sdk.plugin import _PluginBase
-from app.schemas import DownloaderFile, DownloaderTorrent, TorrentInfo
+from app.schemas import (
+    DOWNLOAD_TASK_ALREADY_EXISTS,
+    DownloaderFile,
+    DownloaderTorrent,
+    TorrentInfo,
+)
 from app.schemas.types import MediaType, TorrentQueryStatus
 
 from .downloader import (
@@ -47,8 +52,10 @@ from .torrents import (
 
 EPISODE_PATTERNS = (
     re.compile(r"[Ss](\d{1,2})[._ ]?[Ee](\d{1,4})"),
-    re.compile(r"(?:第|EP|Ep|ep)(\d{1,4})[集话話]"),
+    re.compile(r"(?:第|EP|Ep|ep)\s*(\d{1,4})[集话話]"),
+    re.compile(r"(?:第|EP|Ep|ep)\s*(\d{1,4})\s*[-~]\s*\d{1,4}"),
     re.compile(r"[\[\(【]\s*(\d{1,4})\s*[\]\)】]"),
+    re.compile(r"(?<![\dA-Za-z])(\d{1,4})\s*[-~]\s*\d{1,4}(?![\dA-Za-z])"),
 )
 STORAGE_PREFIX = ("u115:", "alipan:", "rclone:", "alist:", "alistgo:", "smb:")
 
@@ -296,8 +303,9 @@ class QuarkChannel(_PluginBase):
         }
 
     def get_page(self) -> Optional[list[dict]]:
-        """返回插件详情页。"""
-        tasks = self._manager.tasks() if self._manager else []
+        """返回插件详情页；插件尚未初始化时按空任务展示。"""
+        manager = self._manager
+        tasks = manager.tasks() if manager else []
         running = len([item for item in tasks if item.state == STATE_DOWNLOADING])
         completed = len([item for item in tasks if item.state == STATE_COMPLETED])
         return [
@@ -403,7 +411,14 @@ class QuarkChannel(_PluginBase):
                 for item in selected
             ],
         )
-        self._manager.submit(task, entry.share_url, entry.passcode)
+        existing = self._manager.get(task_hash)
+        if existing and existing.state in {STATE_DOWNLOADING, STATE_COMPLETED}:
+            logger.info(f"网盘直链任务已存在：{entry.title}（{existing.state}）")
+            return "网盘直链", task_hash, "", DOWNLOAD_TASK_ALREADY_EXISTS
+        submitted = self._manager.submit(task, entry.share_url, entry.passcode)
+        if submitted is not task:
+            logger.info(f"网盘直链任务已存在：{entry.title}（{submitted.state}）")
+            return "网盘直链", submitted.hash, "", DOWNLOAD_TASK_ALREADY_EXISTS
         logger.info(f"已提交网盘直链任务：{entry.title}，{len(selected)} 个文件 → {task.save_dir}")
         return "网盘直链", task_hash, "", ""
 
@@ -634,7 +649,7 @@ class QuarkChannel(_PluginBase):
 
     @staticmethod
     def _select_files(entry: ShareEntry, episodes: Optional[set]) -> list[dict]:
-        """按目标集数筛选文件；无法解析集号时保留全部。"""
+        """按目标集数筛选文件；目标集数非空但无一命中时返回空，避免整包下载。"""
         files = [item for item in entry.files if not item.get("dir")]
         if not episodes:
             return files
@@ -642,11 +657,15 @@ class QuarkChannel(_PluginBase):
         if not wanted:
             return files
         matched = [item for item in files if QuarkChannel._episode_of(str(item.get("name") or "")) in wanted]
-        return matched or files
+        return matched
 
     @staticmethod
     def _episode_of(name: str) -> Optional[int]:
-        """从文件名解析集号。"""
+        """从文件名解析集号。
+
+        支持 S01E01-E02、EP01-02、01-02 等连集写法；连集只返回起始集号，
+        因为 MoviePilot 的 episodes 是集号集合，本插件不再展开区间（局限）。
+        """
         for pattern in EPISODE_PATTERNS:
             match = pattern.search(name)
             if match:

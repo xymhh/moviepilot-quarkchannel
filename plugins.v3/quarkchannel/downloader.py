@@ -316,6 +316,11 @@ class DownloadManager:
             payload = response.content or b""
             if response.status_code == 200 and start > 0:
                 raise RuntimeError("服务器不支持分段下载")
+            expected = end - start + 1
+            if len(payload) != expected:
+                raise RuntimeError(
+                    f"文件大小不一致：{item.name} 分片 {start}-{end} 收到 {len(payload)}/{expected}"
+                )
             with open(destination, "r+b") as writer:
                 writer.seek(start)
                 writer.write(payload)
