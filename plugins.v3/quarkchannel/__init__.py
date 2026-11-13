@@ -30,7 +30,7 @@ try:  # 与站点索引模块同源：MoviePilot 搜索链会直接调用 to_dic
     from app.domain.context import TorrentInfo
 except ImportError:  # pragma: no cover - 兼容宿主结构调整
     from app.schemas import TorrentInfo
-from app.schemas.types import MediaType, TorrentQueryStatus
+from app.schemas.types import MediaType, SystemConfigKey, TorrentQueryStatus
 
 from .downloader import (
     DownloadManager,
@@ -114,6 +114,8 @@ class QuarkChannel(_PluginBase):
             except Exception as error:  # noqa: BLE001 - 配置回写失败不应阻断启用
                 logger.warning(f"直链频道签名密钥回写失败：{error}")
         self._secret = secret
+        if self._enabled:
+            self._ensure_downloader_entry()
         logger.info(
             f"网盘直链频道初始化：enabled={self._enabled}，"
             f"pansou={bool(self._pansou.ready)}，下载根目录={self._download_root()}"
@@ -358,6 +360,7 @@ class QuarkChannel(_PluginBase):
             "mp_base_url": "http://127.0.0.1:3000",
             "quark_cookie": "",
             "download_root": "/downloads",
+            "downloader_name": "网盘直链",
             "keyword_whitelist": "",
         }
 
@@ -473,13 +476,13 @@ class QuarkChannel(_PluginBase):
         existing = self._manager.get(task_hash)
         if existing and existing.state in {STATE_DOWNLOADING, STATE_COMPLETED}:
             logger.info(f"网盘直链任务已存在：{entry.title}（{existing.state}）")
-            return "网盘直链", task_hash, "", DOWNLOAD_TASK_ALREADY_EXISTS
+            return self._downloader_name(), task_hash, "", DOWNLOAD_TASK_ALREADY_EXISTS
         submitted = self._manager.submit(task, entry.share_url, entry.passcode)
         if submitted is not task:
             logger.info(f"网盘直链任务已存在：{entry.title}（{submitted.state}）")
-            return "网盘直链", submitted.hash, "", DOWNLOAD_TASK_ALREADY_EXISTS
+            return self._downloader_name(), submitted.hash, "", DOWNLOAD_TASK_ALREADY_EXISTS
         logger.info(f"已提交网盘直链任务：{entry.title}，{len(selected)} 个文件 → {task.save_dir}")
-        return "网盘直链", task_hash, "", ""
+        return self._downloader_name(), task_hash, "", ""
 
     def list_torrents(self, status: Optional[Union[str, TorrentQueryStatus]] = None,
                       hashs: Optional[Union[list[str], str]] = None,
@@ -494,6 +497,10 @@ class QuarkChannel(_PluginBase):
         elif isinstance(hashs, (list, tuple, set)):
             wanted = {str(item) for item in hashs if item}
         query = str(getattr(status, "value", status) or "all").lower()
+        own_name = self._downloader_name()
+        if downloader and downloader != own_name:
+            # 下载页按标签查询：其他下载器的标签不返回本插件任务，避免重复显示
+            return []
         results: list[DownloaderTorrent] = []
         for task in self._manager.tasks():
             if wanted is not None and task.hash not in wanted:
@@ -506,7 +513,7 @@ class QuarkChannel(_PluginBase):
             if query in {"paused", "stopped"} and state != STATE_STOPPED:
                 continue
             results.append(DownloaderTorrent(
-                downloader="网盘直链",
+                downloader=own_name,
                 hash=task.hash,
                 title=task.folder,
                 name=task.title,
@@ -682,6 +689,43 @@ class QuarkChannel(_PluginBase):
         return {"success": True, "message": f"已清理 {removed} 条过期分享"}
 
     # ---------- 内部工具 ----------
+
+    def _downloader_name(self) -> str:
+        """本插件在 MoviePilot 下载器列表中的名称。"""
+        return str(self._config.get("downloader_name") or "网盘直链")
+
+    def _ensure_downloader_entry(self) -> None:
+        """在系统下载器配置里登记本插件，让下载页出现独立标签。
+
+        MoviePilot 的下载页按系统配置里的下载器名称分标签，
+        因此插件提供一个同名条目；实际任务由本插件自己的 list_torrents 返回。
+        """
+        name = self._downloader_name()
+        try:
+            current = self.systemconfig.get(SystemConfigKey.Downloaders) or []
+        except Exception as error:  # noqa: BLE001 - 配置读取失败不应阻断插件
+            logger.warning(f"读取下载器配置失败：{error}")
+            return
+        items = [dict(item) for item in current if isinstance(item, dict)]
+        existing = next((item for item in items if item.get("name") == name), None)
+        if existing is not None and existing.get("enabled"):
+            return
+        if existing is not None:
+            existing["enabled"] = True
+        else:
+            items.append({
+                "name": name,
+                "type": "QuarkChannel",
+                "default": False,
+                "config": {},
+                "enabled": True,
+                "path_mapping": [],
+            })
+        try:
+            self.systemconfig.set(SystemConfigKey.Downloaders, items)
+            logger.info(f"已登记下载器条目：{name}")
+        except Exception as error:  # noqa: BLE001 - 登记失败时仅影响界面展示
+            logger.warning(f"登记下载器条目失败：{error}")
 
     def _make_client(self) -> QuarkShareClient:
         """创建取链客户端。"""

@@ -41,6 +41,28 @@ class _RequestUtils:
         return None
 
 
+class _SystemConfigKey:
+    """系统配置键桩。"""
+
+    Downloaders = "Downloaders"
+
+
+class _SystemConfig:
+    """系统配置桩：内存字典。"""
+
+    def __init__(self) -> None:
+        """初始化存储。"""
+        self._data: dict = {}
+
+    def get(self, key):
+        """读取配置。"""
+        return self._data.get(str(key))
+
+    def set(self, key, value):
+        """写入配置。"""
+        self._data[str(key)] = value
+
+
 class _PluginBase:
     """插件基类桩。"""
 
@@ -53,6 +75,10 @@ class _PluginBase:
     plugin_config_prefix = ""
     plugin_order = 999
     auth_level = 1
+
+    def __init__(self) -> None:
+        """初始化系统配置桩。"""
+        self.systemconfig = _SystemConfig()
 
     def get_data_path(self) -> Path:
         """返回临时数据目录。"""
@@ -153,6 +179,7 @@ def _install_stubs() -> None:
 
     types_module = _module("app.schemas.types")
     types_module.MediaType = _MediaType
+    types_module.SystemConfigKey = _SystemConfigKey
     types_module.TorrentQueryStatus = _TorrentQueryStatus
     schemas.types = types_module
 
