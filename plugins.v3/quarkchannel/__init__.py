@@ -44,6 +44,7 @@ from .downloader import (
 )
 from .shares.quark import QuarkShareClient, extract_pwd_id
 from .sources.pansou import PansouSource, normalize_share_url
+from .sources.tgchannel import TgIndex, TgMonitor
 from .torrents import (
     ShareEntry,
     TorrentCache,
@@ -71,7 +72,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.5.0"
+    plugin_version = "0.6.0"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -83,6 +84,8 @@ class QuarkChannel(_PluginBase):
     _cache: Optional[TorrentCache] = None
     _manager: Optional[DownloadManager] = None
     _pansou: Optional[PansouSource] = None
+    _tg_index: Optional[TgIndex] = None
+    _tg_monitor: Optional[TgMonitor] = None
     _secret: str = ""
     _aria2_secret: str = ""
 
@@ -95,6 +98,8 @@ class QuarkChannel(_PluginBase):
         self._config = config
         data_dir = self.get_data_path()
         self._cache = TorrentCache(data_dir)
+        self._stop_tg_monitor()
+        self._tg_index = TgIndex(data_dir)
         sign_secret = str(config.get("sign_secret") or "").strip()
         aria2_secret = str(config.get("aria2_secret") or "").strip()
         config_changed = False
@@ -132,6 +137,39 @@ class QuarkChannel(_PluginBase):
             plugins=str(config.get("pansou_plugins") or ""),
             cloud_types=str(config.get("pansou_cloud_types") or "quark"),
         )
+        if bool(config.get("tg_enabled")):
+            api_id = api_hash = session = ""
+            try:
+                api_id = int(config.get("tg_api_id") or 0)
+                scan_limit = max(1, min(int(config.get("tg_scan_limit") or 100), 1000))
+                interval = max(1, min(int(config.get("tg_interval_minutes") or 10), 1440))
+            except (TypeError, ValueError):
+                logger.warning("Telegram 监控参数无效，未启动")
+            else:
+                api_hash = str(config.get("tg_api_hash") or "").strip()
+                session = str(config.get("tg_session") or "").strip()
+                raw_channels = str(config.get("tg_channels") or "")
+                channels = list(dict.fromkeys(
+                    item.strip() for item in re.split(r"[,，\n]+", raw_channels) if item.strip()
+                ))
+                if api_id and api_hash and session and channels:
+                    try:
+                        monitor = TgMonitor(
+                            data_dir, api_id, api_hash, session, channels,
+                            scan_limit=scan_limit, interval_minutes=interval,
+                            backfill=bool(config.get("tg_backfill")),
+                        )
+                        monitor.start()
+                        self._tg_monitor = monitor
+                        self._tg_index = monitor.index
+                        logger.info(
+                            f"Telegram 频道监控已启动：{len(channels)} 个频道，"
+                            f"间隔 {interval} 分钟"
+                        )
+                    except Exception as error:  # noqa: BLE001 - 监控失败不影响搜索下载
+                        logger.warning(f"Telegram 监控启动失败：{type(error).__name__}")
+                else:
+                    logger.warning("Telegram 监控配置不完整，未启动")
         if self._enabled:
             self._ensure_downloader_entry()
         logger.info(
@@ -144,11 +182,23 @@ class QuarkChannel(_PluginBase):
         return self._enabled
 
     def stop_service(self) -> None:
-        """停止下载线程并释放资源。"""
+        """停止 Telegram 监控、下载线程并释放资源。"""
+        self._stop_tg_monitor()
         if self._manager:
             self._manager.shutdown()
         self._manager = None
         self._enabled = False
+
+    def _stop_tg_monitor(self) -> None:
+        """停止并释放 Telegram 监控线程。"""
+        monitor = self._tg_monitor
+        self._tg_monitor = None
+        if not monitor:
+            return
+        try:
+            monitor.stop()
+        except Exception as error:  # noqa: BLE001 - 停止失败不阻断插件卸载
+            logger.warning(f"停止 Telegram 监控失败：{type(error).__name__}")
 
     # ---------- 页面与接口 ----------
 
@@ -421,6 +471,110 @@ class QuarkChannel(_PluginBase):
                         ],
                     },
                     {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "tg_enabled",
+                                            "label": "启用 Telegram 频道监控",
+                                            "hint": "新消息写入本地增量索引，搜索时优先命中",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "tg_api_id",
+                                            "label": "TG api_id",
+                                            "type": "number",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "tg_scan_limit",
+                                            "label": "单频道扫描条数",
+                                            "type": "number",
+                                            "placeholder": "100",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "tg_interval_minutes",
+                                            "label": "轮询间隔（分钟）",
+                                            "type": "number",
+                                            "placeholder": "10",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "tg_api_hash",
+                                            "label": "TG api_hash",
+                                            "type": "password",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 8},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "tg_session",
+                                            "label": "TG StringSession",
+                                            "type": "password",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VTextField",
+                        "props": {
+                            "model": "tg_channels",
+                            "label": "Telegram 频道",
+                            "placeholder": "多个频道用英文逗号分隔，例如 @channel1,@channel2",
+                        },
+                    },
+                    {
                         "component": "VSwitch",
                         "props": {
                             "model": "keep_saved",
@@ -505,6 +659,14 @@ class QuarkChannel(_PluginBase):
             "aria2_enabled": True,
             "aria2_connections": 64,
             "aria2_split": 64,
+            "tg_enabled": False,
+            "tg_api_id": "",
+            "tg_api_hash": "",
+            "tg_session": "",
+            "tg_channels": "",
+            "tg_scan_limit": 100,
+            "tg_interval_minutes": 10,
+            "tg_backfill": False,
             "keep_saved": False,
             "downloader_name": "网盘直链",
             "keyword_whitelist": "",
@@ -548,38 +710,95 @@ class QuarkChannel(_PluginBase):
     def search_torrents(self, site: Optional[dict] = None, keyword: Optional[str] = None,
                         mtype: Optional[MediaType] = None, cat: Optional[str] = None,
                         page: int = 0) -> list[TorrentInfo]:
-        """把分享链接包装成种子资源返回给 MoviePilot。"""
+        """优先查 Telegram 增量索引，再合并 pansou 结果并返回种子资源。"""
         if not self._enabled or not keyword or page:
             return []
         if not self._keyword_allowed(keyword):
             logger.debug(f"直链频道跳过关键词：{keyword}")
             return []
-        if not self._pansou or not self._pansou.ready:
-            return []
         limit = max(1, min(int(self._config.get("max_results") or 3), 10))
-        candidates = self._pansou.search(keyword, limit=limit * 2)
         results: list[TorrentInfo] = []
-        for item in candidates:
-            if len(results) >= limit:
-                break
-            entry = self._ensure_entry(item["url"], item.get("passcode", ""), item.get("title", ""))
-            if not entry:
-                continue
-            results.append(TorrentInfo(
-                site=None,
-                site_name=str(item.get("source") or "pansou"),
-                title=entry.title,
-                description=f"网盘直链 · {len(entry.files)} 个文件",
-                enclosure=self._torrent_url(entry.sid),
-                page_url=entry.share_url,
-                size=float(entry.total_size),
-                seeders=0,
-                pubdate=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                pri_order=0,
-                category=mtype.value if isinstance(mtype, MediaType) else None,
-            ))
+        seen: set[str] = set()
+        if self._tg_index:
+            try:
+                tg_items = self._tg_index.search(keyword, limit=limit)
+            except Exception as error:  # noqa: BLE001 - 索引损坏不应阻断 pansou
+                logger.warning(f"读取 Telegram 索引失败：{type(error).__name__}")
+                tg_items = []
+            for item in tg_items:
+                if len(results) >= limit:
+                    break
+                if not isinstance(item, dict):
+                    continue
+                url = str(item.get("share_url") or item.get("url") or "").strip()
+                if not url:
+                    continue
+                sid = str(item.get("sid") or "").strip()
+                if not sid:
+                    sid = build_sid(normalize_share_url(url) or url)
+                if sid in seen:
+                    continue
+                entry = self._ensure_search_entry(
+                    url, str(item.get("passcode") or ""), str(item.get("title") or ""),
+                )
+                if not entry or entry.sid in seen:
+                    continue
+                seen.add(sid)
+                seen.add(entry.sid)
+                results.append(self._torrent_from_entry(
+                    entry, str(item.get("channel") or "telegram"), 10, mtype,
+                ))
+        if self._pansou and self._pansou.ready and len(results) < limit:
+            candidates = self._pansou.search(keyword, limit=limit * 2)
+            for item in candidates:
+                if len(results) >= limit:
+                    break
+                if not isinstance(item, dict):
+                    continue
+                url = str(item.get("url") or item.get("share_url") or "").strip()
+                if not url:
+                    continue
+                candidate_sid = build_sid(normalize_share_url(url) or url)
+                if candidate_sid in seen:
+                    continue
+                entry = self._ensure_search_entry(
+                    url, str(item.get("passcode") or ""), str(item.get("title") or ""),
+                )
+                if not entry or entry.sid in seen:
+                    continue
+                seen.add(candidate_sid)
+                seen.add(entry.sid)
+                results.append(self._torrent_from_entry(
+                    entry, str(item.get("source") or "pansou"), 0, mtype,
+                ))
         logger.info(f"直链频道为「{keyword}」提供 {len(results)} 条资源")
         return results
+
+    def _ensure_search_entry(self, share_url: str, passcode: str,
+                             title: str) -> Optional[ShareEntry]:
+        """搜索链获取快照；单条异常只跳过该条，不阻断后续来源。"""
+        try:
+            return self._ensure_entry(share_url, passcode, title)
+        except Exception as error:  # noqa: BLE001 - 单条失败不影响其它候选
+            logger.warning(f"读取分享快照失败：{share_url}，{type(error).__name__}")
+            return None
+
+    def _torrent_from_entry(self, entry: ShareEntry, site_name: str,
+                            pri_order: int, mtype: Optional[MediaType]) -> TorrentInfo:
+        """把分享快照包装成 MoviePilot 种子信息。"""
+        return TorrentInfo(
+            site=None,
+            site_name=str(site_name or "pansou"),
+            title=entry.title,
+            description=f"网盘直链 · {len(entry.files)} 个文件",
+            enclosure=self._torrent_url(entry.sid),
+            page_url=entry.share_url,
+            size=float(entry.total_size),
+            seeders=0,
+            pubdate=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            pri_order=int(pri_order),
+            category=mtype.value if isinstance(mtype, MediaType) else None,
+        )
 
     def download(self, content: Union[Path, str, bytes], download_dir: Path,
                  cookie: Optional[str] = None, episodes: Optional[set] = None,
@@ -776,6 +995,16 @@ class QuarkChannel(_PluginBase):
         pansou_ok, pansou_reason = (False, "未初始化")
         if self._pansou:
             pansou_ok, pansou_reason = self._pansou.check_auth()
+        tg_index = self._tg_index or getattr(self._tg_monitor, "index", None)
+        tg_entries = len(getattr(tg_index, "entries", []) or []) if tg_index else 0
+        tg_last_poll = float(getattr(tg_index, "last_poll", 0.0) or 0.0)
+        if self._tg_monitor:
+            try:
+                tg_last_poll = max(
+                    tg_last_poll, float(getattr(self._tg_monitor, "last_poll", 0.0) or 0.0),
+                )
+            except (TypeError, ValueError):
+                pass
         return {
             "success": True,
             "data": {
@@ -783,6 +1012,8 @@ class QuarkChannel(_PluginBase):
                 "pansou": bool(self._pansou and self._pansou.ready),
                 "pansou_ok": pansou_ok,
                 "pansou_reason": pansou_reason,
+                "tg_entries": tg_entries,
+                "tg_last_poll": tg_last_poll,
                 "download_root": self._download_root(),
                 "tasks": [
                     {
