@@ -6,7 +6,9 @@ export function useViewport(breakpoint = 600) {
 
   function update() {
     if (typeof window !== "undefined") {
-      width.value = window.innerWidth
+      // 预览模式：允许用 ?w=390 模拟窄屏，便于本地截图核对移动端布局
+      const forced = Number(window.__QC_PREVIEW_WIDTH__ || 0)
+      width.value = forced > 0 ? forced : window.innerWidth
     }
   }
 

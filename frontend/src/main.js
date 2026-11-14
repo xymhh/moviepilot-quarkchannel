@@ -2,19 +2,21 @@ import { createApp, h, ref } from "vue"
 import { createVuetify } from "vuetify"
 import { aliases, mdi } from "vuetify/iconsets/mdi"
 import "vuetify/styles"
-import {
-  VApp,
-  VContainer,
-  VMain,
-  VTab,
-  VTabs,
-  VWindow,
-  VWindowItem,
-} from "vuetify/components"
+import * as components from "vuetify/components"
+import * as directives from "vuetify/directives"
+
+const { VApp, VContainer, VMain, VTab, VTabs, VWindow, VWindowItem } = components
 import AppPage from "./components/AppPage.vue"
 import Config from "./components/Config.vue"
 
+const previewWidth = Number(new URLSearchParams(location.search).get("w") || 0)
+if (previewWidth > 0) {
+  window.__QC_PREVIEW_WIDTH__ = previewWidth
+}
+
 const vuetify = createVuetify({
+  components,
+  directives,
   theme: { defaultTheme: "dark" },
   icons: { defaultSet: "mdi", aliases, sets: { mdi } },
 })
@@ -154,7 +156,12 @@ const Root = {
                 default: () =>
                   h(
                     VContainer,
-                    { class: "py-4", style: "max-width: 1100px" },
+                    {
+                      class: "py-4",
+                      style: previewWidth > 0
+                        ? `max-width: ${previewWidth}px; width: 100%; padding: 0 8px`
+                        : "max-width: 1100px",
+                    },
                     {
                       default: () => [
                         h(
