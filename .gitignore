@@ -6,5 +6,6 @@ venv/
 *.log
 data/
 .pytest-data/
+frontend/node_modules/
 /*_TODO.md
 .DS_Store

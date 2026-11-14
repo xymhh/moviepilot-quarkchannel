@@ -131,18 +131,27 @@ class TgIndex:
         return len(self._entries)
 
     def search(self, keyword: str, limit: int = 5,
-               max_age_days: int = DEFAULT_MAX_AGE_DAYS) -> list[dict]:
-        """按标题模糊搜索，返回按时间倒序的索引副本。"""
+               max_age_days: int = DEFAULT_MAX_AGE_DAYS,
+               channel: Optional[str] = None) -> list[dict]:
+        """按标题模糊搜索，返回按时间倒序的索引副本。
+
+        :param keyword: 关键词
+        :param limit: 返回上限
+        :param max_age_days: 条目最大保留天数
+        :param channel: 可选的频道过滤条件
+        """
         if self._purge(self._max_age_days):
             self.save()
         needle = _normalize(keyword)
         if not needle:
             return []
         cutoff = time.time() - max(1, int(max_age_days)) * 86400
+        wanted = str(channel or "").strip()
         rows = [
             dict(item) for item in self._entries
             if _timestamp(item.get("created_at")) >= cutoff
             and needle in _normalize(item.get("title"))
+            and (not wanted or str(item.get("channel") or "") == wanted)
         ]
         rows.sort(
             key=lambda item: (
@@ -203,7 +212,8 @@ class TgMonitor:
 
     def __init__(self, data_dir: Path, api_id: int, api_hash: str, session: str,
                  channels: list[str], scan_limit: int = 100,
-                 interval_minutes: int = 10, backfill: bool = False) -> None:
+                 interval_minutes: int = 10, backfill: bool = False,
+                 index: Optional[TgIndex] = None) -> None:
         """保存凭据与轮询参数；不会在此连接 Telegram。
 
         :param data_dir: 插件数据目录
@@ -214,9 +224,10 @@ class TgMonitor:
         :param scan_limit: 单频道单次最多拉取消息数
         :param interval_minutes: 轮询间隔分钟数
         :param backfill: 首次接入时是否回补最近 scan_limit 条消息
+        :param index: 可选的共享索引；多渠道监控共用一份 tg_index.json
         """
         self.data_dir = Path(data_dir)
-        self.index = TgIndex(self.data_dir)
+        self.index = index if index is not None else TgIndex(self.data_dir)
         self.api_id = int(api_id or 0)
         self.api_hash = str(api_hash or "")
         self.session = str(session or "")
@@ -252,10 +263,12 @@ class TgMonitor:
                 logger.warning("Telegram 监控停止超时，线程仍在退出中")
         self._thread = None
 
-    async def poll_once(self, client: Any = None) -> list[dict]:
-        """扫描全部频道一次，返回本次新增的索引条目。
+    async def poll_once(self, client: Any = None,
+                        channels: Optional[Iterable[str]] = None) -> list[dict]:
+        """扫描频道一次，返回本次新增的索引条目。
 
         :param client: 可选的 Telethon 客户端；为空时使用监控器自己的客户端
+        :param channels: 可选的本次扫描频道列表；为空时扫描全部已配置频道
         :return: 新增条目列表
         """
         client = client or self._client or getattr(self, "client", None)
@@ -263,8 +276,9 @@ class TgMonitor:
             client = await self._ensure_client()
         if client is None:
             return []
+        targets = list(channels) if channels is not None else self.channels
         added: list[dict] = []
-        for channel in self.channels:
+        for channel in targets:
             if self._stop_event.is_set():
                 break
             while not self._stop_event.is_set():

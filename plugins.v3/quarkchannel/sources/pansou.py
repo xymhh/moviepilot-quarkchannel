@@ -9,7 +9,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import OrderedDict
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, Union
 from urllib.parse import urlparse
 
 from app.sdk.logging import logger
@@ -62,6 +62,15 @@ def _pick_passcode(node: dict, url: str) -> str:
     return ""
 
 
+def _as_items(value: Any) -> list[str]:
+    """把字符串、列表统一成去重候选项列表。"""
+    if isinstance(value, (list, tuple, set)):
+        items = [str(item) for item in value]
+    else:
+        items = str(value or "").replace("，", ",").split(",")
+    return [item.strip() for item in items if item.strip()]
+
+
 def _pick_size(node: dict) -> int:
     """从节点中读取字节大小；缺失或格式异常时返回 0。"""
     for key in ("size", "file_size", "size_bytes", "total_size", "bytes"):
@@ -83,7 +92,9 @@ class PansouSource:
 
     def __init__(self, base_url: str, token: str = "", username: str = "",
                  password: str = "", timeout: int = 20, src: str = "all",
-                 plugins: str = "", cloud_types: str = "quark") -> None:
+                 plugins: Union[str, list[str]] = "",
+                 cloud_types: Union[str, list[str]] = "quark",
+                 cache_namespace: str = "") -> None:
         """保存服务地址与访问凭据。
 
         :param base_url: 自建 pansou 地址，例如 http://pansou:8888
@@ -94,6 +105,7 @@ class PansouSource:
         :param src: 数据来源类型：all / tg（仅 Telegram 频道）/ plugin（仅插件）
         :param plugins: 指定启用的 pansou 插件，逗号分隔；空表示全部
         :param cloud_types: 返回的网盘类型，逗号分隔；空表示全部
+        :param cache_namespace: 进程内缓存命名空间，多渠道时按渠道隔离
         """
         self._base = (base_url or "").rstrip("/")
         self._token = (token or "").strip()
@@ -101,8 +113,9 @@ class PansouSource:
         self._password = password or ""
         self._timeout = timeout
         self._src = (src or "all").strip() or "all"
-        self._plugins = [item.strip() for item in (plugins or "").replace("，", ",").split(",") if item.strip()]
-        self._cloud_types = [item.strip() for item in (cloud_types or "").replace("，", ",").split(",") if item.strip()]
+        self._plugins = _as_items(plugins)
+        self._cloud_types = _as_items(cloud_types)
+        self._cache_namespace = str(cache_namespace or "").strip()
         self._search_cache: OrderedDict[tuple, tuple[float, list[dict]]] = OrderedDict()
         self._cache_lock = threading.RLock()
 
@@ -164,7 +177,10 @@ class PansouSource:
 
     def _cache_key(self, keyword: str) -> tuple:
         """生成插件侧搜索缓存键。"""
-        return (keyword, self._src, tuple(self._plugins), tuple(self._cloud_types))
+        return (
+            self._cache_namespace, keyword, self._src,
+            tuple(self._plugins), tuple(self._cloud_types),
+        )
 
     def _cache_get(self, key: tuple) -> Optional[list[dict]]:
         """读取未过期的缓存副本，并刷新 LRU 顺序。"""

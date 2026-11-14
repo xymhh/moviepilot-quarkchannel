@@ -8,9 +8,11 @@ import pytest
 
 from app.schemas import DOWNLOAD_TASK_ALREADY_EXISTS
 from quarkchannel import QuarkChannel
+from quarkchannel.channels import ChannelStore
 from quarkchannel.downloader import STATE_COMPLETED, STATE_DOWNLOADING, STATE_ERROR
 from quarkchannel.sources import pansou as pansou_module
 from quarkchannel.sources.pansou import PansouSource
+from quarkchannel.sources.tgchannel import TgIndex
 from quarkchannel.torrents import ShareEntry, TorrentCache, build_sid, render_torrent
 
 
@@ -347,3 +349,182 @@ def test_search_dedupes_episode_and_keeps_largest_file():
     assert len(rows) == 2
     assert rows[0].size == 300.0 and "fid=large" in rows[0].enclosure
     assert rows[1].size == 200.0 and "fid=e2" in rows[1].enclosure
+
+
+def test_search_falls_back_to_legacy_when_channels_empty(tmp_path: Path):
+    """channels.json 为空时仍走旧 pansou，避免升级即断。"""
+    plugin = QuarkChannel()
+    plugin._enabled = True
+    plugin._config = {"max_results": 3}
+    plugin._secret = "secret"
+    plugin._cache = None
+    plugin._channels = ChannelStore(tmp_path)
+    plugin._tg_index = None
+    plugin._pansou = _Pansou([
+        {"url": "https://pan.quark.cn/s/legacy", "title": "旧资源", "source": "pansou"},
+    ])
+    rows = plugin.search_torrents(keyword="资源")
+    assert [item.title for item in rows] == ["旧资源"]
+    assert rows[0].pri_order == 0
+
+
+def test_search_uses_channel_priority_and_dedup(tmp_path: Path, monkeypatch):
+    """多渠道按 priority 合并，禁用渠道不参与，重复 sid 只保留高优先级。"""
+    store = ChannelStore(tmp_path)
+    store.create({
+        "name": "TG 高优", "type": "tg_channel", "enabled": True, "priority": 80,
+        "config": {"channel": "@high"},
+    })
+    store.create({
+        "name": "盘搜", "type": "pansou", "enabled": True, "priority": 50,
+        "config": {"base_url": "http://pansou:8888"},
+    })
+    store.create({
+        "name": "禁用高优", "type": "pansou", "enabled": False, "priority": 99,
+        "config": {"base_url": "http://disabled:8888"},
+    })
+    plugin = QuarkChannel()
+    plugin._enabled = True
+    plugin._config = {"max_results": 5}
+    plugin._secret = "secret"
+    plugin._cache = None
+    plugin._channels = store
+    plugin._tg_index = TgIndex(tmp_path)
+    plugin._tg_index.add_entries([
+        {"sid": "same", "title": "合集资源", "channel": "@high",
+         "share_url": "https://pan.quark.cn/s/same", "msg_id": 2},
+        {"sid": "low", "title": "合集资源", "channel": "@low",
+         "share_url": "https://pan.quark.cn/s/low", "msg_id": 1},
+    ])
+    monkeypatch.setattr(
+        PansouSource, "search",
+        lambda self, keyword, limit=20, bypass_cache=False: [
+            {"url": "https://pan.quark.cn/s/same", "title": "重复", "source": "pansou"},
+            {"url": "https://pan.quark.cn/s/pan", "title": "盘搜资源", "source": "pansou"},
+        ],
+    )
+    rows = plugin.search_torrents(keyword="合集")
+    assert [item.title for item in rows] == ["合集资源", "盘搜资源"]
+    assert [item.pri_order for item in rows] == [80, 50]
+    assert rows[0].site_name == "@high"
+
+
+def test_search_tg_channel_only_returns_own_entries(tmp_path: Path):
+    """单个 tg_channel 渠道只搜自己频道，索引里其它频道不串入。"""
+    store = ChannelStore(tmp_path)
+    store.create({
+        "name": "@own", "type": "tg_channel", "enabled": True, "priority": 10,
+        "config": {"channel": "@own"},
+    })
+    plugin = QuarkChannel()
+    plugin._enabled = True
+    plugin._config = {"max_results": 5}
+    plugin._secret = "secret"
+    plugin._cache = None
+    plugin._channels = store
+    plugin._tg_index = TgIndex(tmp_path)
+    plugin._tg_index.add_entries([
+        {"sid": "own", "title": "同标题", "channel": "@own",
+         "share_url": "https://pan.quark.cn/s/own", "msg_id": 2},
+        {"sid": "other", "title": "同标题", "channel": "@other",
+         "share_url": "https://pan.quark.cn/s/other", "msg_id": 1},
+    ])
+    rows = plugin.search_torrents(keyword="同标题")
+    assert [item.page_url for item in rows] == ["https://pan.quark.cn/s/own"]
+
+
+def test_search_does_not_fall_back_when_channels_only_disabled(tmp_path: Path):
+    """存在渠道但全部禁用时返回空，不能回退旧全局 pansou。"""
+    store = ChannelStore(tmp_path)
+    store.create({
+        "name": "停用盘搜", "type": "pansou", "enabled": False, "priority": 99,
+        "config": {"base_url": "http://disabled:8888"},
+    })
+    plugin = QuarkChannel()
+    plugin._enabled = True
+    plugin._config = {"max_results": 5}
+    plugin._secret = "secret"
+    plugin._cache = None
+    plugin._channels = store
+    plugin._tg_index = None
+    plugin._pansou = _Pansou([
+        {"url": "https://pan.quark.cn/s/legacy", "title": "不该返回", "source": "pansou"},
+    ])
+    assert plugin.search_torrents(keyword="资源") == []
+
+
+def test_sidebar_and_render_mode_contract():
+    """侧栏入口与 Vue 远端页面契约固定。"""
+    plugin = QuarkChannel()
+    assert plugin.get_render_mode() == ("vue", "dist/assets")
+    assert plugin.get_sidebar_nav() == [{
+        "nav_key": "channels",
+        "title": "渠道管理",
+        "icon": "mdi-rss",
+        "section": "system",
+        "permission": "manage",
+        "order": 6,
+    }]
+
+
+def test_channel_api_crud_and_summary(tmp_path: Path, monkeypatch):
+    """渠道 API 完成新增、列表、更新、探活、汇总与删除。"""
+    plugin = QuarkChannel()
+    plugin._channels = ChannelStore(tmp_path)
+    plugin._tg_index = TgIndex(tmp_path)
+    created = plugin.api_channel_create({
+        "name": "盘搜", "type": "pansou", "priority": 20,
+        "config": {"base_url": "http://pansou:8888"},
+    })
+    assert created["success"] is True
+    channel_id = created["data"]["id"]
+    assert plugin.api_channels()["data"]["items"][0]["id"] == channel_id
+
+    monkeypatch.setattr(PansouSource, "check_auth", lambda self: (True, ""))
+    probe = plugin.api_channel_test(channel_id)
+    assert probe["success"] is True
+
+    updated = plugin.api_channel_update(channel_id, {"priority": 60})
+    assert updated["success"] is True
+    assert updated["data"]["priority"] == 60
+    summary = plugin.api_channels_summary()["data"]
+    assert summary["total"] == 1 and summary["enabled"] == 1
+    assert plugin.api_channel_delete(channel_id)["success"] is True
+    assert plugin.api_channel_delete(channel_id)["success"] is False
+
+
+def test_channel_monitors_dedupe_and_share_index(tmp_path: Path, monkeypatch):
+    """每个启用频道一个监控，同频道重复渠道只保留高优先级。"""
+    store = ChannelStore(tmp_path)
+    store.create({"name": "高", "type": "tg_channel", "priority": 90,
+                  "config": {"channel": "@same"}})
+    store.create({"name": "低", "type": "tg_channel", "priority": 70,
+                  "config": {"channel": "@same"}})
+    store.create({"name": "其它", "type": "tg_channel", "priority": 60,
+                  "config": {"channel": "@other"}})
+    plugin = QuarkChannel()
+    plugin._channels = store
+    plugin._tg_index = TgIndex(tmp_path)
+    plugin._config = {
+        "tg_api_id": 1, "tg_api_hash": "hash", "tg_session": "session",
+    }
+    created = []
+
+    class _Monitor:
+        def __init__(self, data_dir, api_id, api_hash, session, channels, **kwargs):
+            self.channels = channels
+            self.index = kwargs.get("index")
+            self.started = False
+            created.append(self)
+
+        def start(self):
+            self.started = True
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr("quarkchannel.TgMonitor", _Monitor)
+    plugin._start_tg_runtime()
+    assert [item.channels for item in created] == [["@same"], ["@other"]]
+    assert all(item.started for item in created)
+    assert all(item.index is plugin._tg_index for item in created)

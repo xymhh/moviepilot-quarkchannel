@@ -8,6 +8,7 @@ MoviePilot 侧只负责：搜索聚合、订阅、过滤、下载管理、整理
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 import secrets
@@ -37,6 +38,7 @@ except ImportError:  # pragma: no cover - 兼容宿主结构调整
 from app.schemas.types import MediaType, SystemConfigKey, TorrentQueryStatus
 
 from .aria2 import Aria2Launcher
+from .channels import ChannelStore
 from .downloader import (
     DownloadManager,
     DownloadTask,
@@ -82,7 +84,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.7.0"
+    plugin_version = "0.8.0"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -94,8 +96,10 @@ class QuarkChannel(_PluginBase):
     _cache: Optional[TorrentCache] = None
     _manager: Optional[DownloadManager] = None
     _pansou: Optional[PansouSource] = None
+    _channels: Optional[ChannelStore] = None
     _tg_index: Optional[TgIndex] = None
-    _tg_monitor: Optional[TgMonitor] = None
+    _tg_monitors: list[TgMonitor] = []
+    _channel_sources: dict[str, tuple[tuple, PansouSource]] = {}
     _secret: str = ""
     _aria2_secret: str = ""
 
@@ -107,6 +111,8 @@ class QuarkChannel(_PluginBase):
         self._prewarm_pool: Optional[ThreadPoolExecutor] = None
         self._prewarm_lock = threading.Lock()
         self._prewarm_inflight: set[str] = set()
+        self._tg_monitors = []
+        self._channel_sources = {}
 
     # ---------- 生命周期 ----------
 
@@ -122,6 +128,15 @@ class QuarkChannel(_PluginBase):
         self._cache = TorrentCache(data_dir)
         self._stop_tg_monitor()
         self._tg_index = TgIndex(data_dir)
+        self._channels = ChannelStore(data_dir)
+        self._channel_sources = {}
+        try:
+            migrated = self._channels.migrate_from_config(config)
+        except Exception as error:  # noqa: BLE001 - 迁移失败不阻断插件启动
+            migrated = 0
+            logger.warning(f"渠道迁移失败：{type(error).__name__}")
+        if migrated:
+            logger.info(f"已从旧配置迁移 {migrated} 个渠道")
         sign_secret = str(config.get("sign_secret") or "").strip()
         aria2_secret = str(config.get("aria2_secret") or "").strip()
         config_changed = False
@@ -159,51 +174,10 @@ class QuarkChannel(_PluginBase):
             plugins=str(config.get("pansou_plugins") or ""),
             cloud_types=str(config.get("pansou_cloud_types") or "quark"),
         )
-        if bool(config.get("tg_enabled")):
-            api_id = api_hash = session = ""
-            try:
-                api_id = int(config.get("tg_api_id") or 0)
-                scan_limit = max(1, min(int(config.get("tg_scan_limit") or 100), 1000))
-                interval = max(1, min(int(config.get("tg_interval_minutes") or 10), 1440))
-            except (TypeError, ValueError):
-                logger.warning("Telegram 监控参数无效，未启动")
-            else:
-                api_hash = str(config.get("tg_api_hash") or "").strip()
-                session = str(config.get("tg_session") or "").strip()
-                raw_channels = config.get("tg_channels") or ""
-                if isinstance(raw_channels, (list, tuple)):
-                    # 兼容上一版的列表配置：转成多行文本便于在手机端编辑
-                    raw_channels = "\n".join(str(item) for item in raw_channels)
-                    config["tg_channels"] = raw_channels
-                    try:
-                        self.update_config(config)
-                    except Exception:  # noqa: BLE001 - 迁移失败不影响启动
-                        pass
-                if isinstance(raw_channels, str):
-                    raw_items = re.split(r"[,，\n|]+", raw_channels)
-                else:
-                    raw_items = [str(item) for item in raw_channels]
-                channels = list(dict.fromkeys(
-                    item.strip() for item in raw_items if str(item).strip()
-                ))
-                if api_id and api_hash and session and channels:
-                    try:
-                        monitor = TgMonitor(
-                            data_dir, api_id, api_hash, session, channels,
-                            scan_limit=scan_limit, interval_minutes=interval,
-                            backfill=bool(config.get("tg_backfill")),
-                        )
-                        monitor.start()
-                        self._tg_monitor = monitor
-                        self._tg_index = monitor.index
-                        logger.info(
-                            f"Telegram 频道监控已启动：{len(channels)} 个频道，"
-                            f"间隔 {interval} 分钟"
-                        )
-                    except Exception as error:  # noqa: BLE001 - 监控失败不影响搜索下载
-                        logger.warning(f"Telegram 监控启动失败：{type(error).__name__}")
-                else:
-                    logger.warning("Telegram 监控配置不完整，未启动")
+        dist_file = Path(__file__).resolve().parent / "dist/assets/remoteEntry.js"
+        if not dist_file.exists():
+            logger.warning("渠道管理前端资源未构建，暂时保留旧版 JSON 配置页")
+        self._start_tg_runtime()
         if self._enabled:
             self._ensure_downloader_entry()
         logger.info(
@@ -234,15 +208,128 @@ class QuarkChannel(_PluginBase):
             pool.shutdown(wait=False, cancel_futures=True)
 
     def _stop_tg_monitor(self) -> None:
-        """停止并释放 Telegram 监控线程。"""
-        monitor = self._tg_monitor
-        self._tg_monitor = None
-        if not monitor:
+        """停止并释放全部 Telegram 监控线程。"""
+        monitors = list(self._tg_monitors)
+        self._tg_monitors = []
+        for monitor in monitors:
+            try:
+                monitor.stop()
+            except Exception as error:  # noqa: BLE001 - 停止失败不阻断插件卸载
+                logger.warning(f"停止 Telegram 监控失败：{type(error).__name__}")
+
+    def _shared_tg_index(self, data_dir: Path) -> TgIndex:
+        """返回进程内唯一索引，避免空索引被布尔判断重建。"""
+        if self._tg_index is None:
+            self._tg_index = TgIndex(data_dir)
+        return self._tg_index
+
+    def _tg_credentials(self, config: dict) -> Optional[tuple[int, str, str]]:
+        """读取全局 Telegram 凭据；缺失或格式错误时返回 None。"""
+        try:
+            api_id = int(config.get("tg_api_id") or 0)
+        except (TypeError, ValueError):
+            logger.warning("Telegram api_id 无效，未启动监控")
+            return None
+        api_hash = str(config.get("tg_api_hash") or "").strip()
+        session = str(config.get("tg_session") or "").strip()
+        if not api_id or not api_hash or not session:
+            return None
+        return api_id, api_hash, session
+
+    def _start_tg_runtime(self) -> None:
+        """按渠道模式启动监控；无渠道时回退旧的全局配置。"""
+        config = dict(self._config or {})
+        data_dir = self.get_data_path()
+        channels = self._channels.list() if self._channels else []
+        if channels:
+            self._start_channel_monitors(channels, config, data_dir)
+        else:
+            self._start_legacy_monitor(config, data_dir)
+
+    def _start_channel_monitors(self, channels: list[dict], config: dict,
+                                data_dir: Path) -> None:
+        """为每个启用的 tg_channel 渠道建立独立监控，同频道只保留一个。"""
+        targets = [
+            item for item in channels
+            if item.get("enabled") and item.get("type") == "tg_channel"
+        ]
+        if not targets:
+            return
+        credentials = self._tg_credentials(config)
+        if not credentials:
+            logger.warning("Telegram 监控配置不完整，未启动")
+            return
+        api_id, api_hash, session = credentials
+        index = self._shared_tg_index(data_dir)
+        seen: set[str] = set()
+        for channel in targets:
+            cfg = channel.get("config") or {}
+            target = str(cfg.get("channel") or "").strip()
+            if not target or target in seen:
+                continue
+            seen.add(target)
+            try:
+                monitor = TgMonitor(
+                    data_dir, api_id, api_hash, session, [target],
+                    scan_limit=int(cfg.get("scan_limit") or 100),
+                    interval_minutes=int(cfg.get("interval_minutes") or 10),
+                    backfill=bool(cfg.get("backfill")),
+                    index=index,
+                )
+                monitor.start()
+                self._tg_monitors.append(monitor)
+            except Exception as error:  # noqa: BLE001 - 单频道失败不影响其它频道
+                logger.warning(f"Telegram 渠道监控启动失败：{type(error).__name__}")
+        if self._tg_monitors:
+            logger.info(f"Telegram 渠道监控已启动：{len(self._tg_monitors)} 个渠道")
+
+    def _start_legacy_monitor(self, config: dict, data_dir: Path) -> None:
+        """无渠道数据时沿用旧 tg_enabled/tg_channels 配置。"""
+        if not bool(config.get("tg_enabled")):
+            return
+        credentials = self._tg_credentials(config)
+        if not credentials:
+            logger.warning("Telegram 监控配置不完整，未启动")
+            return
+        raw_channels = config.get("tg_channels") or ""
+        if isinstance(raw_channels, (list, tuple)):
+            raw_items = [str(item) for item in raw_channels]
+        else:
+            raw_items = re.split(r"[,，\n|]+", str(raw_channels))
+        channels = list(dict.fromkeys(
+            item.strip() for item in raw_items if str(item).strip()
+        ))
+        if not channels:
+            logger.warning("Telegram 监控配置不完整，未启动")
             return
         try:
-            monitor.stop()
-        except Exception as error:  # noqa: BLE001 - 停止失败不阻断插件卸载
-            logger.warning(f"停止 Telegram 监控失败：{type(error).__name__}")
+            interval = max(1, min(int(config.get("tg_interval_minutes") or 10), 1440))
+            scan_limit = max(1, min(int(config.get("tg_scan_limit") or 100), 1000))
+        except (TypeError, ValueError):
+            logger.warning("Telegram 监控参数无效，未启动")
+            return
+        api_id, api_hash, session = credentials
+        index = self._shared_tg_index(data_dir)
+        try:
+            monitor = TgMonitor(
+                data_dir, api_id, api_hash, session, channels,
+                scan_limit=scan_limit, interval_minutes=interval,
+                backfill=bool(config.get("tg_backfill")), index=index,
+            )
+            monitor.start()
+            self._tg_monitors.append(monitor)
+            logger.info(
+                f"Telegram 频道监控已启动：{len(channels)} 个频道，"
+                f"间隔 {interval} 分钟"
+            )
+        except Exception as error:  # noqa: BLE001 - 监控失败不影响搜索下载
+            logger.warning(f"Telegram 监控启动失败：{type(error).__name__}")
+
+    def _refresh_channel_runtime(self) -> None:
+        """渠道变更后重建 pansou 实例与 Telegram 监控。"""
+        self._channel_sources = {}
+        self._stop_tg_monitor()
+        self._start_tg_runtime()
 
     # ---------- 页面与接口 ----------
 
@@ -301,6 +388,55 @@ class QuarkChannel(_PluginBase):
                 "methods": ["POST"],
                 "auth": "bear",
                 "summary": "清理过期分享缓存",
+            },
+            {
+                "path": "/channels",
+                "endpoint": self.api_channels,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "列出全部渠道",
+            },
+            {
+                "path": "/channels",
+                "endpoint": self.api_channel_create,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "新增渠道",
+            },
+            {
+                "path": "/channels/summary",
+                "endpoint": self.api_channels_summary,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "渠道汇总统计",
+            },
+            {
+                "path": "/channels/{channel_id}",
+                "endpoint": self.api_channel_update,
+                "methods": ["PUT"],
+                "auth": "bear",
+                "summary": "更新渠道",
+            },
+            {
+                "path": "/channels/{channel_id}",
+                "endpoint": self.api_channel_delete,
+                "methods": ["DELETE"],
+                "auth": "bear",
+                "summary": "删除渠道",
+            },
+            {
+                "path": "/channels/{channel_id}/test",
+                "endpoint": self.api_channel_test,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "探测渠道可用性",
+            },
+            {
+                "path": "/channels/{channel_id}/scan",
+                "endpoint": self.api_channel_scan,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "立即扫描 TG 渠道",
             },
         ]
 
@@ -522,6 +658,21 @@ class QuarkChannel(_PluginBase):
         }
         return [{"component": "VForm", "content": [tabs, window]}], defaults
 
+    def get_render_mode(self) -> tuple[str, str]:
+        """声明 Vue 远端页面入口；前端资源未构建时仍保留旧配置页。"""
+        return "vue", "dist/assets"
+
+    def get_sidebar_nav(self) -> list[dict]:
+        """在系统侧栏注册渠道管理入口。"""
+        return [{
+            "nav_key": "channels",
+            "title": "渠道管理",
+            "icon": "mdi-rss",
+            "section": "system",
+            "permission": "manage",
+            "order": 6,
+        }]
+
     def get_page(self) -> Optional[list[dict]]:
         """返回插件详情页；插件尚未初始化时按空任务展示。"""
         manager = self._manager
@@ -568,59 +719,11 @@ class QuarkChannel(_PluginBase):
             logger.debug(f"直链频道跳过关键词：{keyword}")
             return []
         limit = max(1, min(int(self._config.get("max_results") or 3), 10))
-        candidates: list[dict] = []
-        seen: set[str] = set()
-        if self._tg_index:
-            try:
-                tg_items = self._tg_index.search(keyword, limit=limit)
-            except Exception as error:  # noqa: BLE001 - 索引损坏不应阻断 pansou
-                logger.warning(f"读取 Telegram 索引失败：{type(error).__name__}")
-                tg_items = []
-            for item in tg_items:
-                if len(candidates) >= limit:
-                    break
-                if not isinstance(item, dict):
-                    continue
-                url = str(item.get("share_url") or item.get("url") or "").strip()
-                if not url:
-                    continue
-                normalized = normalize_share_url(url) or url
-                sid = build_sid(normalized)
-                if sid in seen:
-                    continue
-                seen.add(sid)
-                candidate = self._make_candidate(
-                    sid, normalized, str(item.get("passcode") or ""),
-                    str(item.get("title") or ""), str(item.get("channel") or "telegram"),
-                    10, 10, item.get("size"),
-                )
-                item_sid = str(item.get("sid") or "").strip()
-                if item_sid and item_sid != sid:
-                    candidate["lookup_sids"] = [item_sid]
-                candidates.append(candidate)
-        if self._pansou and self._pansou.ready and len(candidates) < limit:
-            for item in self._pansou.search(keyword, limit=limit * 2):
-                if len(candidates) >= limit:
-                    break
-                if not isinstance(item, dict):
-                    continue
-                url = str(item.get("url") or item.get("share_url") or "").strip()
-                if not url:
-                    continue
-                normalized = normalize_share_url(url) or url
-                sid = build_sid(normalized)
-                if sid in seen:
-                    continue
-                seen.add(sid)
-                candidate = self._make_candidate(
-                    sid, normalized, str(item.get("passcode") or ""),
-                    str(item.get("title") or ""), str(item.get("source") or "pansou"),
-                    0, 5, item.get("size"),
-                )
-                item_sid = str(item.get("sid") or "").strip()
-                if item_sid and item_sid != sid:
-                    candidate["lookup_sids"] = [item_sid]
-                candidates.append(candidate)
+        channels = self._channels.list() if self._channels else []
+        if channels:
+            candidates = self._collect_channel_candidates(channels, keyword, limit)
+        else:
+            candidates = self._collect_legacy_candidates(keyword, limit)
         results: list[TorrentInfo] = []
         for candidate in candidates:
             results.extend(self._results_for_candidate(candidate, mtype))
@@ -632,6 +735,132 @@ class QuarkChannel(_PluginBase):
             f"耗时 {time.time() - started:.2f}s"
         )
         return results
+
+    def _channel_pansou(self, channel: dict) -> PansouSource:
+        """按渠道配置复用 pansou 实例，保留进程内缓存。"""
+        config = channel.get("config") or {}
+        source_id = str(channel.get("id") or "")
+        signature = (
+            str(config.get("base_url") or ""),
+            str(config.get("token") or ""),
+            str(config.get("username") or ""),
+            str(config.get("password") or ""),
+            str(config.get("src") or "all"),
+            tuple(config.get("plugins") or []),
+            tuple(config.get("cloud_types") or []),
+        )
+        cached = self._channel_sources.get(source_id)
+        if cached and cached[0] == signature:
+            return cached[1]
+        source = PansouSource(
+            str(config.get("base_url") or ""),
+            token=str(config.get("token") or ""),
+            username=str(config.get("username") or ""),
+            password=str(config.get("password") or ""),
+            timeout=max(5, min(int(config.get("timeout") or self._config.get("pansou_timeout") or 20), 120)),
+            src=str(config.get("src") or "all"),
+            plugins=list(config.get("plugins") or []),
+            cloud_types=list(config.get("cloud_types") or []),
+            cache_namespace=source_id,
+        )
+        self._channel_sources[source_id] = (signature, source)
+        return source
+
+    def _collect_channel_candidates(self, channels: list[dict], keyword: str,
+                                    limit: int) -> list[dict]:
+        """按 priority 倒序遍历启用渠道，合并去重并生成候选。"""
+        candidates: list[dict] = []
+        seen: set[str] = set()
+        for channel in channels:
+            if len(candidates) >= limit:
+                break
+            if not channel.get("enabled"):
+                continue
+            channel_type = str(channel.get("type") or "")
+            config = channel.get("config") or {}
+            priority = int(channel.get("priority") or 0)
+            site_name = str(channel.get("name") or channel_type)
+            if channel_type == "pansou":
+                source = self._channel_pansou(channel)
+                if not source.ready:
+                    continue
+                try:
+                    rows = source.search(keyword, limit=limit * 2)
+                except Exception as error:  # noqa: BLE001 - 单渠道失败不影响其它渠道
+                    logger.warning(f"盘搜渠道「{site_name}」搜索失败：{type(error).__name__}")
+                    continue
+                for item in rows:
+                    if len(candidates) >= limit:
+                        break
+                    self._append_candidate(candidates, seen, item, site_name,
+                                           priority, priority, False)
+            elif channel_type == "tg_channel" and self._tg_index is not None:
+                target = str(config.get("channel") or "").strip()
+                if not target:
+                    continue
+                try:
+                    rows = self._tg_index.search(
+                        keyword, limit=limit, channel=target,
+                    )
+                except Exception as error:  # noqa: BLE001 - 索引损坏不应阻断其它渠道
+                    logger.warning(f"读取 Telegram 渠道「{site_name}」失败：{type(error).__name__}")
+                    continue
+                for item in rows:
+                    if len(candidates) >= limit:
+                        break
+                    self._append_candidate(candidates, seen, item, site_name,
+                                           priority, priority, True)
+        return candidates
+
+    def _append_candidate(self, candidates: list[dict], seen: set[str], item: Any,
+                          site_name: str, pri_order: int, expand_pri: int,
+                          is_tg: bool) -> None:
+        """解析单条渠道结果并按 sid 去重。"""
+        if not isinstance(item, dict):
+            return
+        url = str(item.get("share_url") or item.get("url") or "").strip()
+        if not url:
+            return
+        normalized = normalize_share_url(url) or url
+        sid = build_sid(normalized)
+        if sid in seen:
+            return
+        seen.add(sid)
+        label = str(item.get("channel") or site_name) if is_tg else site_name
+        candidate = self._make_candidate(
+            sid, normalized, str(item.get("passcode") or ""),
+            str(item.get("title") or ""), label,
+            pri_order, expand_pri, item.get("size"),
+        )
+        item_sid = str(item.get("sid") or "").strip()
+        if item_sid and item_sid != sid:
+            candidate["lookup_sids"] = [item_sid]
+        candidates.append(candidate)
+
+    def _collect_legacy_candidates(self, keyword: str, limit: int) -> list[dict]:
+        """无渠道数据时沿用旧逻辑：TG 索引优先，pansou 补充。"""
+        candidates: list[dict] = []
+        seen: set[str] = set()
+        if self._tg_index is not None:
+            try:
+                tg_items = self._tg_index.search(keyword, limit=limit)
+            except Exception as error:  # noqa: BLE001 - 索引损坏不应阻断 pansou
+                logger.warning(f"读取 Telegram 索引失败：{type(error).__name__}")
+                tg_items = []
+            for item in tg_items:
+                if len(candidates) >= limit:
+                    break
+                self._append_candidate(
+                    candidates, seen, item,
+                    str((item or {}).get("channel") or "telegram") if isinstance(item, dict) else "telegram",
+                    10, 10, True,
+                )
+        if self._pansou and self._pansou.ready and len(candidates) < limit:
+            for item in self._pansou.search(keyword, limit=limit * 2):
+                if len(candidates) >= limit:
+                    break
+                self._append_candidate(candidates, seen, item, "pansou", 0, 5, False)
+        return candidates
 
     @staticmethod
     def _size_of(value: Any) -> int:
@@ -1037,22 +1266,175 @@ class QuarkChannel(_PluginBase):
             },
         }
 
+    def _channel_store(self) -> ChannelStore:
+        """返回渠道存储；未初始化时按当前数据目录惰性创建。"""
+        if self._channels is None:
+            self._channels = ChannelStore(self.get_data_path())
+        return self._channels
+
+    def api_channels(self) -> dict:
+        """列出全部渠道（含配置与统计）。"""
+        return {"success": True, "data": {"items": self._channel_store().list()}}
+
+    def api_channel_create(self, payload: Optional[dict] = None) -> dict:
+        """新增渠道；仅返回新渠道 id。"""
+        try:
+            item = self._channel_store().create(dict(payload or {}))
+        except ValueError as error:
+            return {"success": False, "message": str(error)}
+        self._refresh_channel_runtime()
+        return {"success": True, "data": {"id": item["id"]}}
+
+    def api_channel_update(self, channel_id: str = "",
+                           payload: Optional[dict] = None) -> dict:
+        """局部更新渠道字段。"""
+        try:
+            item = self._channel_store().update(str(channel_id or ""), dict(payload or {}))
+        except ValueError as error:
+            return {"success": False, "message": str(error)}
+        if not item:
+            return {"success": False, "message": "渠道不存在"}
+        self._refresh_channel_runtime()
+        return {"success": True, "data": item}
+
+    def api_channel_delete(self, channel_id: str = "") -> dict:
+        """删除渠道；删除后立即刷新运行时。"""
+        if not self._channel_store().delete(str(channel_id or "")):
+            return {"success": False, "message": "渠道不存在"}
+        self._refresh_channel_runtime()
+        return {"success": True}
+
+    def api_channel_test(self, channel_id: str = "") -> dict:
+        """探测渠道可用性：pansou 走鉴权，TG 走 get_entity。"""
+        channel = self._channel_store().get(str(channel_id or ""))
+        if not channel:
+            return {"success": False, "message": "渠道不存在"}
+        if channel.get("type") == "pansou":
+            try:
+                source = self._channel_pansou(channel)
+                ok, reason = source.check_auth()
+            except Exception as error:  # noqa: BLE001 - 探活失败只返回结果
+                return {"success": False, "message": f"探测失败：{type(error).__name__}"}
+            if ok:
+                return {"success": True, "message": "盘搜渠道可用"}
+            return {"success": False, "message": reason or "盘搜渠道不可用"}
+        config = channel.get("config") or {}
+        target = str(config.get("channel") or "").strip()
+        credentials = self._tg_credentials(self._config)
+        if not credentials:
+            return {"success": False, "message": "Telegram 凭据不完整"}
+        if not target:
+            return {"success": False, "message": "渠道缺少频道标识"}
+        api_id, api_hash, session = credentials
+        data_dir = self.get_data_path()
+
+        async def probe() -> tuple[bool, str]:
+            monitor = TgMonitor(
+                data_dir, api_id, api_hash, session, [target],
+                index=self._shared_tg_index(data_dir),
+            )
+            client = await monitor._ensure_client()
+            if client is None:
+                return False, "Telegram 客户端不可用"
+            try:
+                entity = await client.get_entity(target)
+                title = str(getattr(entity, "title", "") or target)
+                return True, f"频道可用：{title}"
+            except Exception as error:  # noqa: BLE001 - 单次探测失败
+                return False, f"频道探测失败：{type(error).__name__}"
+            finally:
+                await monitor._disconnect()
+
+        try:
+            ok, message = asyncio.run(probe())
+        except Exception as error:  # noqa: BLE001 - 探测异常不拖垮接口
+            ok, message = False, f"频道探测失败：{type(error).__name__}"
+        return {"success": ok, "message": message}
+
+    def api_channel_scan(self, channel_id: str = "") -> dict:
+        """立即扫描一个 TG 渠道一次，返回新增条目数。"""
+        store = self._channel_store()
+        channel = store.get(str(channel_id or ""))
+        if not channel:
+            return {"success": False, "message": "渠道不存在"}
+        if channel.get("type") != "tg_channel":
+            return {"success": False, "message": "pansou 渠道不支持扫描"}
+        config = channel.get("config") or {}
+        target = str(config.get("channel") or "").strip()
+        credentials = self._tg_credentials(self._config)
+        if not credentials:
+            return {"success": False, "message": "Telegram 凭据不完整"}
+        if not target:
+            return {"success": False, "message": "渠道缺少频道标识"}
+        api_id, api_hash, session = credentials
+        data_dir = self.get_data_path()
+        index = self._shared_tg_index(data_dir)
+
+        async def scan() -> list[dict]:
+            monitor = TgMonitor(
+                data_dir, api_id, api_hash, session, [target],
+                scan_limit=int(config.get("scan_limit") or 100),
+                interval_minutes=int(config.get("interval_minutes") or 10),
+                backfill=bool(config.get("backfill")), index=index,
+            )
+            try:
+                return await monitor.poll_once()
+            finally:
+                await monitor._disconnect()
+
+        try:
+            added = asyncio.run(scan())
+        except Exception as error:  # noqa: BLE001 - 扫描失败记录到统计
+            store.record_stat(channel["id"], error=type(error).__name__)
+            return {"success": False, "message": f"扫描失败：{type(error).__name__}"}
+        store.record_stat(channel["id"], hits=len(added))
+        return {
+            "success": True,
+            "message": f"扫描完成，新增 {len(added)} 条",
+            "data": {"added": len(added)},
+        }
+
+    def api_channels_summary(self) -> dict:
+        """返回渠道总数、启用数、TG 索引条目与最近轮询时间。"""
+        items = self._channel_store().list()
+        index = self._tg_index
+        return {
+            "success": True,
+            "data": {
+                "total": len(items),
+                "enabled": len([item for item in items if item.get("enabled")]),
+                "tg_entries": len(getattr(index, "entries", []) or []) if index is not None else 0,
+                "last_poll": float(getattr(index, "last_poll", 0.0) or 0.0) if index is not None else 0.0,
+            },
+        }
+
     def api_status(self) -> dict:
         """返回运行状态（含盘搜鉴权自检）。"""
         tasks = self._manager.tasks() if self._manager else []
         pansou_ok, pansou_reason = (False, "未初始化")
         if self._pansou:
             pansou_ok, pansou_reason = self._pansou.check_auth()
-        tg_index = self._tg_index or getattr(self._tg_monitor, "index", None)
-        tg_entries = len(getattr(tg_index, "entries", []) or []) if tg_index else 0
-        tg_last_poll = float(getattr(tg_index, "last_poll", 0.0) or 0.0)
-        if self._tg_monitor:
+        tg_index = self._tg_index
+        tg_entries = len(getattr(tg_index, "entries", []) or []) if tg_index is not None else 0
+        tg_last_poll = float(getattr(tg_index, "last_poll", 0.0) or 0.0) if tg_index is not None else 0.0
+        for monitor in self._tg_monitors:
             try:
                 tg_last_poll = max(
-                    tg_last_poll, float(getattr(self._tg_monitor, "last_poll", 0.0) or 0.0),
+                    tg_last_poll, float(getattr(monitor, "last_poll", 0.0) or 0.0),
                 )
             except (TypeError, ValueError):
                 pass
+        channel_items = self._channels.list() if self._channels else []
+        channel_stats = [
+            {
+                "id": str(item.get("id") or ""),
+                "name": str(item.get("name") or ""),
+                "last_scan": float((item.get("stats") or {}).get("last_scan") or 0.0),
+                "last_error": str((item.get("stats") or {}).get("last_error") or ""),
+                "hits": int((item.get("stats") or {}).get("hits") or 0),
+            }
+            for item in channel_items
+        ]
         return {
             "success": True,
             "data": {
@@ -1062,6 +1444,11 @@ class QuarkChannel(_PluginBase):
                 "pansou_reason": pansou_reason,
                 "tg_entries": tg_entries,
                 "tg_last_poll": tg_last_poll,
+                "channels": len(channel_items),
+                "channel_stats": channel_stats,
+                "channel_last_scan": {
+                    item["id"]: item["last_scan"] for item in channel_stats
+                },
                 "download_root": self._download_root(),
                 "tasks": [
                     {
