@@ -85,7 +85,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.11.0"
+    plugin_version = "0.11.1"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -152,6 +152,7 @@ class QuarkChannel(_PluginBase):
                 if config.get("auto_pick_min_similarity") is not None else 0.75
             ),
             downloader=str(config.get("auto_pick_downloader") or "网盘直链"),
+            save_path=str(config.get("download_root") or "/downloads"),
         )
         sign_secret = str(config.get("sign_secret") or "").strip()
         aria2_secret = str(config.get("aria2_secret") or "").strip()
@@ -196,6 +197,7 @@ class QuarkChannel(_PluginBase):
         self._start_tg_runtime()
         if self._enabled:
             self._ensure_downloader_entry()
+            self._ensure_download_dir()
         logger.info(
             f"网盘直链频道初始化：enabled={self._enabled}，"
             f"pansou={bool(self._pansou.ready)}，下载根目录={self._download_root()}"
@@ -1709,6 +1711,50 @@ class QuarkChannel(_PluginBase):
     def _downloader_name(self) -> str:
         """本插件在 MoviePilot 下载器列表中的名称。"""
         return str(self._config.get("downloader_name") or "网盘直链")
+
+    def _ensure_download_dir(self) -> None:
+        """确保 MoviePilot 的下载目录里存在本插件使用的本地目录。
+
+        MoviePilot 只允许把文件落到「下载目录」配置里的路径，
+        否则会报「保存路径不在允许的下载目录范围内」。
+        """
+        root = self._download_root()
+        name = str(self._config.get("download_dir_name") or "本地直链")
+        try:
+            current = self.systemconfig.get(SystemConfigKey.Directories) or []
+        except Exception as error:  # noqa: BLE001 - 读取失败不阻断插件
+            logger.warning(f"读取下载目录配置失败：{error}")
+            return
+        items = [dict(item) for item in current if isinstance(item, dict)]
+        if any(item.get("download_path") == root for item in items):
+            return
+        items.append({
+            "name": name,
+            "priority": 9,
+            "storage": "local",
+            "download_path": root,
+            "media_type": "",
+            "media_category": None,
+            "media_category_id": None,
+            "download_type_folder": True,
+            "download_category_folder": False,
+            "monitor_type": "manual",
+            "monitor_mode": "fast",
+            "transfer_type": "move",
+            "overwrite_mode": "size",
+            "library_path": str(Path(root) / "媒体库"),
+            "library_storage": "local",
+            "renaming": True,
+            "scraping": False,
+            "notify": True,
+            "library_type_folder": True,
+            "library_category_folder": False,
+        })
+        try:
+            self.systemconfig.set(SystemConfigKey.Directories, items)
+            logger.info(f"已登记本地下载目录：{name} → {root}")
+        except Exception as error:  # noqa: BLE001 - 登记失败仅影响手动下载
+            logger.warning(f"登记下载目录失败：{error}")
 
     def _ensure_downloader_entry(self) -> None:
         """在系统下载器配置里登记本插件，让下载页出现独立标签。

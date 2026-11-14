@@ -657,6 +657,7 @@ class AutoPicker:
                  dry_run: bool = True,
                  min_similarity: float = 0.75,
                  downloader: str = "网盘直链",
+                 save_path: str = "",
                  store: Optional[AutoPickStore] = None,
                  subscribe_oper: Any = None,
                  mediaserver_oper: Any = None,
@@ -691,6 +692,7 @@ class AutoPicker:
         self.enabled = bool(enabled)
         self.dry_run = bool(dry_run)
         self.downloader = str(downloader or "网盘直链")
+        self.save_path = str(save_path or "")
         self.store = store if store is not None else AutoPickStore(self.data_dir)
         self.matcher = SubscriptionMatcher(min_similarity, subscribe_oper)
         self.resolver = MissingEpisodeResolver(self.store, mediaserver_oper)
@@ -875,6 +877,7 @@ class AutoPicker:
                 torrent_content=None,
                 episodes=set(episodes),
                 downloader=self.downloader,
+                save_path=self.save_path or None,
             )
         except Exception as error:  # noqa: BLE001 - 下载失败只记录
             logger.warning(f"自动追更提交下载失败：{type(error).__name__}")
