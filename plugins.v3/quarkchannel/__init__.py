@@ -87,7 +87,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.12.5"
+    plugin_version = "0.12.6"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -1114,7 +1114,9 @@ class QuarkChannel(_PluginBase):
                 by_episode[episode] = (size, item)
         if not by_episode:
             return []
-        share_title = str(candidate.get("title") or entry.title or entry.folder_name).strip()
+        share_title = self._clean_title(
+            str(candidate.get("title") or entry.title or entry.folder_name)
+        )
         results: list[TorrentInfo] = []
         limit = self._expand_limit()
         for episode, (size, item) in sorted(by_episode.items())[:limit or None]:
@@ -1161,7 +1163,7 @@ class QuarkChannel(_PluginBase):
         limit = self._expand_limit()
         for episode, (size, item, candidate) in sorted(merged.items())[:limit or None]:
             file_name = str(item.get("name") or "file")
-            share_title = str(candidate.get("title") or "").strip()
+            share_title = self._clean_title(str(candidate.get("title") or ""))
             title = f"{share_title} {self._episode_label(file_name, episode)}".strip()
             results.append(self._make_torrent(
                 candidate, title, size, int(candidate.get("expand_pri") or 5),
@@ -1195,6 +1197,20 @@ class QuarkChannel(_PluginBase):
             self._search_cache[key] = (time.time(), rows)
             while len(self._search_cache) > 20:
                 self._search_cache.pop(next(iter(self._search_cache)))
+
+    @staticmethod
+    def _clean_title(text: str) -> str:
+        """清理分享标题里的发布标记，方便 MoviePilot 识别片名与集号。
+
+        :param text: 原始分享标题
+        :return: 精简后的标题
+        """
+        raw = str(text or "")
+        raw = re.sub(r"[【\[][^】\]]*[】\]]", " ", raw)
+        raw = re.sub(r"(?:名称[:：]|全集|完结|已完结|更至\s*\d+\s*集|更新至\s*\d+\s*集|全\s*\d+\s*集)", " ", raw)
+        raw = re.sub(r"[#＃]\S+", " ", raw)
+        raw = " ".join(raw.split())
+        return raw[:80] or str(text or "video")[:80]
 
     def _expand_limit(self) -> int:
         """单次搜索最多展开多少集；0 表示不限制（默认完整展开）。"""
