@@ -414,6 +414,59 @@ class DownloadManager:
             except OSError:
                 pass
 
+    def refresh_live(self) -> None:
+        """从 aria2 实时刷新带 gid 任务的进度与速度。
+
+        下载页每次查询都会走这里，保证 UI 显示的是真实进度，
+        不依赖后台线程是否存活。
+        """
+        launcher = self._aria2_launcher
+        rpc = getattr(launcher, "rpc", None) if launcher else None
+        if rpc is None:
+            return
+        with self._lock:
+            snapshot = [(task.hash, list(task.gids)) for task in self._tasks.values() if task.gids]
+        for task_hash, gids in snapshot:
+            done = 0
+            speed = 0
+            all_complete = True
+            failed = ""
+            for gid in gids:
+                status = rpc.tell_status(gid)
+                if not isinstance(status, dict):
+                    failed = "aria2 任务丢失"
+                    break
+                state = str(status.get("status") or "")
+                try:
+                    done += int(status.get("completedLength") or 0)
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    speed += int(status.get("downloadSpeed") or 0)
+                except (TypeError, ValueError):
+                    pass
+                if state != "complete":
+                    all_complete = False
+            task = self._tasks.get(task_hash)
+            if not task:
+                continue
+            with self._lock:
+                if failed:
+                    task.state = STATE_ERROR
+                    task.error = failed
+                    task.gids = []
+                else:
+                    task.done = min(task.total, done) if task.total else done
+                    task.speed = float(speed)
+                    task.updated_at = time.time()
+                    if all_complete:
+                        task.gids = []
+                        task.state = STATE_COMPLETED
+                        task.done = task.total or done
+                    else:
+                        task.state = STATE_DOWNLOADING
+                self._flush()
+
     def _attach_existing(self) -> None:
         """把 aria2 中仍在跑的任务挂回本地任务（插件重载后进度不丢）。"""
         launcher = self._aria2_launcher

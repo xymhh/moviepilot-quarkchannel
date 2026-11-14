@@ -85,7 +85,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.10.6"
+    plugin_version = "0.10.7"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -1173,6 +1173,11 @@ class QuarkChannel(_PluginBase):
         elif isinstance(hashs, (list, tuple, set)):
             wanted = {str(item) for item in hashs if item}
         query = str(getattr(status, "value", status) or "all").lower()
+        if self._manager:
+            try:
+                self._manager.refresh_live()
+            except Exception as error:  # noqa: BLE001 - 刷新失败沿用缓存值
+                logger.debug(f"刷新 aria2 实时进度失败：{type(error).__name__}")
         own_name = self._downloader_name()
         if downloader and downloader != own_name:
             # 下载页按标签查询：其他下载器的标签不返回本插件任务，避免重复显示
