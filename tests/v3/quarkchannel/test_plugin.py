@@ -257,7 +257,7 @@ def test_search_expands_cached_episodes_with_fid():
     )
     plugin = QuarkChannel()
     plugin._enabled = True
-    plugin._config = {"max_results": 5}
+    plugin._config = {"max_results": 5, "expand_in_search": True}
     plugin._secret = "secret"
     plugin._cache = _Cache(entry)
     plugin._tg_index = None
@@ -272,6 +272,37 @@ def test_search_expands_cached_episodes_with_fid():
     assert [item.pri_order for item in rows] == [5, 5, 5]
     assert ["fid=f1" in rows[0].enclosure, "fid=f2" in rows[1].enclosure,
             "fid=f3" in rows[2].enclosure] == [True, True, True]
+
+
+def test_search_collapses_each_share_when_expand_disabled():
+    """默认关闭展开时，一个分享只返回一条整包候选。"""
+    url = "https://pan.quark.cn/s/collapse"
+    sid = build_sid(url)
+    entry = ShareEntry(
+        sid=sid,
+        provider="quark",
+        share_url=url,
+        title="聚合剧集",
+        files=[
+            {"name": "Show.S01E01.mkv", "size": 101, "fid": "f1"},
+            {"name": "Show.S01E02.mkv", "size": 202, "fid": "f2"},
+        ],
+        total_size=303,
+    )
+    plugin = QuarkChannel()
+    plugin._enabled = True
+    plugin._config = {"max_results": 5}
+    plugin._secret = "secret"
+    plugin._cache = _Cache(entry)
+    plugin._tg_index = None
+    plugin._pansou = _Pansou([{"url": url, "title": "聚合剧集", "size": 999,
+                               "source": "pansou"}])
+    rows = plugin.search_torrents(keyword="聚合")
+    assert len(rows) == 1
+    assert rows[0].title == "聚合剧集"
+    assert rows[0].size == 303.0
+    assert "2 个文件 · 可在插件内选集" in rows[0].description
+    assert "fid=" not in rows[0].enclosure
 
 
 def test_search_without_cache_returns_single_whole_candidate():
@@ -310,7 +341,7 @@ def test_search_does_not_expand_movie_snapshot():
     )
     plugin = QuarkChannel()
     plugin._enabled = True
-    plugin._config = {"max_results": 5}
+    plugin._config = {"max_results": 5, "expand_in_search": True}
     plugin._secret = "secret"
     plugin._cache = _Cache(entry)
     plugin._tg_index = None
@@ -340,7 +371,7 @@ def test_search_dedupes_episode_and_keeps_largest_file():
     )
     plugin = QuarkChannel()
     plugin._enabled = True
-    plugin._config = {"max_results": 5}
+    plugin._config = {"max_results": 5, "expand_in_search": True}
     plugin._secret = "secret"
     plugin._cache = _Cache(entry)
     plugin._tg_index = None

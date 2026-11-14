@@ -52,6 +52,42 @@ const channels = ref([
   },
 ])
 
+const previewShares = [
+  {
+    sid: "preview-share-1",
+    title: "示例剧集 第一季",
+    size: 8 * 1024 * 1024 * 1024,
+    files: 12,
+    site_name: "pansou",
+    share_url: "https://pan.quark.cn/s/preview-1",
+  },
+  {
+    sid: "preview-share-2",
+    title: "示例电影 2160p",
+    size: 22 * 1024 * 1024 * 1024,
+    files: 1,
+    site_name: "telegram",
+    share_url: "https://pan.quark.cn/s/preview-2",
+  },
+  {
+    sid: "preview-share-3",
+    title: "示例纪录片合集",
+    size: 5 * 1024 * 1024 * 1024,
+    files: 6,
+    site_name: "pansou",
+    share_url: "https://pan.quark.cn/s/preview-3",
+  },
+]
+
+function previewEpisodes() {
+  return [
+    { episode: 1, fid: "preview-f1", name: "Show.S01E01.mkv", size: 1024 * 1024 * 700 },
+    { episode: 2, fid: "preview-f2", name: "Show.S01E02.mkv", size: 1024 * 1024 * 710 },
+    { episode: 3, fid: "preview-f3", name: "Show.S01E03.mkv", size: 1024 * 1024 * 720 },
+    { episode: null, fid: "preview-fx", name: "花絮.mkv", size: 1024 * 1024 * 80 },
+  ]
+}
+
 let sequence = channels.value.length
 let config = {
   enabled: true,
@@ -59,6 +95,7 @@ let config = {
   download_root: "/downloads",
   max_tasks: 3,
   only_whitelist: false,
+  expand_in_search: false,
   keyword_whitelist: "",
   mp_base_url: "http://127.0.0.1:3000",
   aria2_enabled: true,
@@ -86,6 +123,15 @@ function summary() {
 
 const api = {
   async get(url) {
+    if (url.includes("/shares/") && url.includes("/episodes")) {
+      const match = url.match(/\/shares\/([^/]+)\/episodes/)
+      const share = previewShares.find((item) => item.sid === decodeURIComponent(match?.[1] || ""))
+      const items = share ? previewEpisodes().slice(0, share.files) : []
+      return { success: true, data: { items, total: items.length } }
+    }
+    if (url.includes("/shares?")) {
+      return { success: true, data: { items: previewShares } }
+    }
     if (url.endsWith("/channels/summary")) {
       return { success: true, data: summary() }
     }
@@ -95,6 +141,10 @@ const api = {
     throw new Error("预览接口未实现")
   },
   async post(url, body) {
+    if (url.endsWith("/download_episodes")) {
+      const count = body?.fids?.length || body?.episodes?.length || 1
+      return { success: true, data: { hash: `preview-${Date.now()}`, count, size: 0 } }
+    }
     if (url.includes("/test")) {
       const item = channels.value.find((row) => row.id === channelId(url))
       return {

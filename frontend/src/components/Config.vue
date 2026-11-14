@@ -63,6 +63,15 @@
                   hide-details="auto" />
               </v-col>
               <v-col :cols="isMobile ? 12 : 6">
+                <v-switch
+                  v-model="form.expand_in_search"
+                  label="搜索结果按集展开"
+                  hint="关闭时一个分享只显示一条，可在插件内选集"
+                  color="primary"
+                  density="comfortable"
+                  hide-details="auto" />
+              </v-col>
+              <v-col :cols="isMobile ? 12 : 6">
                 <v-text-field
                   v-model="form.downloader_name"
                   label="下载器名称"
@@ -310,6 +319,7 @@ const defaults = () => ({
   download_root: "/downloads",
   max_tasks: 3,
   only_whitelist: false,
+  expand_in_search: false,
   keyword_whitelist: "",
   mp_base_url: "http://127.0.0.1:3000",
   aria2_enabled: true,
@@ -331,6 +341,7 @@ function applyConfig(config) {
   Object.assign(form, defaults(), source)
   form.enabled = Boolean(form.enabled)
   form.only_whitelist = Boolean(form.only_whitelist)
+  form.expand_in_search = Boolean(form.expand_in_search)
   form.aria2_enabled = Boolean(form.aria2_enabled)
   form.keep_saved = Boolean(form.keep_saved)
   form.rename_on_download = form.rename_on_download !== false

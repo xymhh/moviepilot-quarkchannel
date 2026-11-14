@@ -87,7 +87,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.11.4"
+    plugin_version = "0.12.0"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -440,6 +440,27 @@ class QuarkChannel(_PluginBase):
                 "summary": "查看最近自动追更决策",
             },
             {
+                "path": "/shares",
+                "endpoint": self.api_shares,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "按关键词列出分享（不展开集）",
+            },
+            {
+                "path": "/shares/{sid}/episodes",
+                "endpoint": self.api_share_episodes,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "列出分享内文件与集号",
+            },
+            {
+                "path": "/download_episodes",
+                "endpoint": self.api_download_episodes,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "按集号或文件 id 提交下载",
+            },
+            {
                 "path": "/channels",
                 "endpoint": self.api_channels,
                 "methods": ["GET"],
@@ -598,6 +619,8 @@ class QuarkChannel(_PluginBase):
             field("download_root", "下载根目录", cols=4, placeholder="/downloads"),
             field("max_tasks", "并发下载任务数", kind="number", cols=4),
             field("only_whitelist", "仅白名单关键词生效", kind="switch", cols=4),
+            field("expand_in_search", "搜索结果按集展开", kind="switch", cols=4,
+                  hint="关闭时一个分享只显示一条，可在插件内选集"),
             field("keyword_whitelist", "关键词白名单", cols=4,
                   placeholder="多个关键词用英文逗号分隔"),
         ])
@@ -695,6 +718,7 @@ class QuarkChannel(_PluginBase):
             "download_root": "/downloads",
             "max_tasks": 3,
             "only_whitelist": False,
+            "expand_in_search": False,
             "keyword_whitelist": "",
             "pansou_url": "",
             "pansou_src": "all",
@@ -1019,20 +1043,28 @@ class QuarkChannel(_PluginBase):
 
     def _results_for_candidate(self, candidate: dict,
                                mtype: Optional[MediaType]) -> list[TorrentInfo]:
-        """优先按缓存快照展开分集，未命中时只返回一条整包候选。"""
-        entry = self._cached_entry(str(candidate.get("sid") or ""))
-        if not entry:
-            for alt_sid in candidate.get("lookup_sids") or []:
-                entry = self._cached_entry(str(alt_sid))
-                if entry:
-                    candidate["sid"] = entry.sid
-                    self._remember_pending(candidate)
-                    break
+        """按配置返回一条整包候选，或保留旧的按集展开行为。"""
+        entry = self._candidate_entry(candidate)
+        if not bool(self._config.get("expand_in_search", False)):
+            return [self._whole_candidate(candidate, entry, mtype)]
         if entry:
             expanded = self._expand_candidate(candidate, entry, mtype)
             if expanded:
                 return expanded
         return [self._whole_candidate(candidate, entry, mtype)]
+
+    def _candidate_entry(self, candidate: dict) -> Optional[ShareEntry]:
+        """读取候选对应快照，并兼容渠道原始 sid 的二次查表。"""
+        entry = self._cached_entry(str(candidate.get("sid") or ""))
+        if entry:
+            return entry
+        for alt_sid in candidate.get("lookup_sids") or []:
+            entry = self._cached_entry(str(alt_sid))
+            if entry:
+                candidate["sid"] = entry.sid
+                self._remember_pending(candidate)
+                return entry
+        return None
 
     def _expand_candidate(self, candidate: dict, entry: ShareEntry,
                           mtype: Optional[MediaType]) -> list[TorrentInfo]:
@@ -1066,14 +1098,14 @@ class QuarkChannel(_PluginBase):
 
     def _whole_candidate(self, candidate: dict, entry: Optional[ShareEntry],
                          mtype: Optional[MediaType]) -> TorrentInfo:
-        """构造整包候选；未命中缓存时大小填 0。"""
+        """构造整包候选；有快照时使用总大小与文件数。"""
         size = self._size_of(candidate.get("size"))
         title = str(candidate.get("title") or "")
         detail = "整包（未取到文件清单，点下载会下全部）"
         if entry:
-            size = size or int(entry.total_size or 0)
+            size = int(entry.total_size or size)
             title = title or entry.title
-            detail = f"整包 · {len(entry.files)} 个文件"
+            detail = f"整包 · {len(entry.files)} 个文件 · 可在插件内选集"
         return self._make_torrent(
             candidate, title, size, int(candidate.get("pri_order") or 0),
             "", mtype, detail,
@@ -1540,6 +1572,196 @@ class QuarkChannel(_PluginBase):
         ]
         return {"success": True, "data": {"keyword": keyword, "count": len(items), "items": rows}}
 
+    def _entry_for_sid(self, sid: str) -> Optional[ShareEntry]:
+        """读取分享快照；缓存未命中时按候选登记信息现场取一次。"""
+        entry = self._cached_entry(str(sid or ""))
+        if entry:
+            return entry
+        pending = self._pending_info(str(sid or ""))
+        if not pending or not pending.get("share_url"):
+            return None
+        return self._ensure_entry(
+            str(pending.get("share_url") or ""),
+            str(pending.get("passcode") or ""),
+            str(pending.get("title") or ""),
+        )
+
+    def _episode_items(self, entry: ShareEntry) -> list[dict]:
+        """把快照文件转换为接口条目，并按集号升序、其他文件置后。"""
+        items: list[dict] = []
+        for item in entry.files:
+            if not isinstance(item, dict) or item.get("dir"):
+                continue
+            name = str(item.get("name") or "file")
+            items.append({
+                "episode": self._episode_of(name),
+                "fid": str(item.get("fid") or ""),
+                "name": name,
+                "size": self._size_of(item.get("size")),
+            })
+        items.sort(key=lambda row: (
+            row["episode"] is None,
+            row["episode"] if row["episode"] is not None else 0,
+            row["name"].lower(),
+        ))
+        return items
+
+    def api_shares(self, keyword: str = "", limit: int = 20) -> dict:
+        """按关键词列出分享，不展开集列表。"""
+        keyword = str(keyword or "").strip()
+        if not keyword:
+            return {"success": True, "data": {"items": []}}
+        try:
+            count = int(limit or 20)
+        except (TypeError, ValueError):
+            count = 20
+        count = max(1, min(count, 100))
+        channels = self._channels.list() if self._channels else []
+        if channels:
+            candidates = self._collect_channel_candidates(channels, keyword, count)
+        else:
+            candidates = self._collect_legacy_candidates(keyword, count)
+        items: list[dict] = []
+        for candidate in candidates:
+            entry = self._candidate_entry(candidate)
+            sid = str(candidate.get("sid") or (entry.sid if entry else ""))
+            title = str(candidate.get("title") or (entry.title if entry else ""))
+            files = len([
+                item for item in (entry.files if entry else [])
+                if isinstance(item, dict) and not item.get("dir")
+            ])
+            size = int(entry.total_size or 0) if entry else self._size_of(candidate.get("size"))
+            items.append({
+                "sid": sid,
+                "title": title,
+                "size": size,
+                "files": files,
+                "site_name": str(candidate.get("site_name") or ""),
+                "share_url": str(candidate.get("share_url") or ""),
+            })
+        return {"success": True, "data": {"items": items}}
+
+    def api_share_episodes(self, sid: str = "") -> dict:
+        """列出分享内文件与集号；无集号的文件排在最后。"""
+        sid = str(sid or "").strip()
+        if not sid:
+            return {"success": False, "message": "缺少 sid"}
+        entry = self._entry_for_sid(sid)
+        if not entry:
+            return {"success": False, "message": "分享不可用或没有文件"}
+        items = self._episode_items(entry)
+        return {"success": True, "data": {"items": items, "total": len(items)}}
+
+    def _batch_task_hash(self, entry: ShareEntry, selected: list[dict],
+                         whole: bool) -> str:
+        """为一批文件生成稳定 hash，供下载管理器幂等复用。"""
+        if whole:
+            return sha1_of_torrent(render_torrent(entry))
+        if len(selected) == 1 and str(selected[0].get("fid") or ""):
+            return sha1_of_torrent(render_torrent(entry, fid=str(selected[0]["fid"])))
+        keys = sorted(
+            str(item.get("fid") or item.get("name") or "") for item in selected
+        )
+        return hashlib.sha1(
+            f"{entry.sid}|{','.join(keys)}".encode("utf-8")
+        ).hexdigest()
+
+    def api_download_episodes(self, payload: Optional[dict] = None) -> dict:
+        """按集号或文件 id 提交一批文件；两者都为空时下载整包。"""
+        payload = payload or {}
+        sid = str(payload.get("sid") or "").strip()
+        raw_episodes = payload.get("episodes") or []
+        raw_fids = payload.get("fids") or []
+        if not isinstance(raw_episodes, (list, tuple, set)):
+            raw_episodes = [raw_episodes]
+        if not isinstance(raw_fids, (list, tuple, set)):
+            raw_fids = [raw_fids]
+        if not sid:
+            return {"success": False, "message": "缺少 sid"}
+        if raw_episodes and raw_fids:
+            return {"success": False, "message": "episodes 与 fids 只能二选一"}
+        if not self._manager:
+            return {"success": False, "message": "插件未初始化"}
+        entry = self._entry_for_sid(sid)
+        if not entry:
+            return {"success": False, "message": "分享不可用或没有文件"}
+        files = [
+            item for item in entry.files
+            if isinstance(item, dict) and not item.get("dir")
+            and self._size_of(item.get("size")) > 0
+        ]
+        whole = not raw_episodes and not raw_fids
+        selected: list[dict] = []
+        if raw_fids:
+            wanted = []
+            for value in raw_fids:
+                fid = str(value or "").strip()
+                if fid and fid not in wanted:
+                    wanted.append(fid)
+            by_fid = {str(item.get("fid") or ""): item for item in files}
+            selected = [by_fid[fid] for fid in wanted if fid in by_fid]
+        elif raw_episodes:
+            wanted = set()
+            for value in raw_episodes:
+                try:
+                    episode = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if episode > 0:
+                    wanted.add(episode)
+            if not wanted:
+                return {"success": False, "message": "episodes 格式无效"}
+            selected = self._select_files(entry, wanted)
+            selected = [
+                item for item in selected
+                if self._size_of(item.get("size")) > 0
+            ]
+        else:
+            selected = files
+        if not selected:
+            return {"success": False, "message": "没有匹配到需要下载的文件"}
+        task_hash = self._batch_task_hash(entry, selected, whole)
+        existing = self._manager.get(task_hash)
+        if existing and existing.state in {STATE_DOWNLOADING, STATE_COMPLETED}:
+            return {
+                "success": True,
+                "data": {
+                    "hash": task_hash,
+                    "count": len(selected),
+                    "size": sum(self._size_of(item.get("size")) for item in selected),
+                },
+            }
+        task = DownloadTask(
+            hash=task_hash,
+            sid=entry.sid,
+            title=entry.title,
+            folder=entry.folder_name,
+            save_dir=str(self._download_root()),
+            files=[
+                TaskFile(
+                    name=str(item.get("name") or "file"),
+                    size=self._size_of(item.get("size")),
+                    fid=str(item.get("fid") or ""),
+                    share_token=str(item.get("share_token") or ""),
+                    out_name=self._build_out_name(entry, item),
+                )
+                for item in selected
+            ],
+        )
+        try:
+            submitted = self._manager.submit(task, entry.share_url, entry.passcode)
+        except Exception as error:  # noqa: BLE001 - 提交失败返回明确原因
+            logger.warning(f"选集下载提交失败：{type(error).__name__}")
+            return {"success": False, "message": f"提交失败：{type(error).__name__}"}
+        return {
+            "success": True,
+            "data": {
+                "hash": submitted.hash,
+                "count": len(selected),
+                "size": sum(self._size_of(item.get("size")) for item in selected),
+            },
+        }
+
     def api_auto_pick(self) -> dict:
         """返回自动追更开关与最近决策记录。"""
         picker = self._picker
@@ -1596,6 +1818,7 @@ class QuarkChannel(_PluginBase):
                 "auto_pick_enabled": bool(picker.enabled) if picker else False,
                 "auto_pick_dry_run": bool(picker.dry_run) if picker else True,
                 "auto_pick_picks": auto_pick_picks,
+                "expand_in_search": bool(self._config.get("expand_in_search", False)),
                 "channels": len(channel_items),
                 "channel_stats": channel_stats,
                 "channel_last_scan": {
