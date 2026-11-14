@@ -1,15 +1,18 @@
 <template>
   <div class="qc-detail">
-    <div v-if="plugin.plugin_name || plugin.name" class="text-subtitle-1 mb-1">
-      {{ plugin.plugin_name || plugin.name }}
+    <div class="qc-head">
+      <img v-if="iconUrl" class="qc-icon" :src="iconUrl" alt="" />
+      <div class="qc-head-text">
+        <div class="qc-title">{{ plugin.plugin_name || plugin.name || "网盘直链频道" }}</div>
+        <div class="qc-meta">
+          <span v-if="plugin.plugin_version">v{{ plugin.plugin_version }}</span>
+          <span v-if="plugin.plugin_version && author"> · </span>
+          <span v-if="author">{{ author }}</span>
+        </div>
+      </div>
     </div>
-    <div v-if="plugin.plugin_desc || plugin.description" class="text-body-2 text-medium-emphasis mb-2">
+    <div v-if="plugin.plugin_desc || plugin.description" class="qc-desc">
       {{ plugin.plugin_desc || plugin.description }}
-    </div>
-    <div v-if="plugin.plugin_version || plugin.author" class="text-caption text-medium-emphasis mb-3">
-      <span v-if="plugin.plugin_version">v{{ plugin.plugin_version }}</span>
-      <span v-if="plugin.plugin_version && plugin.author"> · </span>
-      <span v-if="plugin.plugin_author || plugin.author">{{ plugin.plugin_author || plugin.author }}</span>
     </div>
 
     <v-row dense class="mb-3">
@@ -93,6 +96,15 @@ const emit = defineEmits(["switch", "close"])
 
 const plugin = ref({})
 
+const author = computed(() => plugin.value.plugin_author || plugin.value.author || "")
+
+const iconUrl = computed(() => {
+  const icon = plugin.value.plugin_icon
+  if (!icon) return ""
+  if (icon.startsWith("http")) return icon
+  return `./plugin_icon/${icon}`
+})
+
 const summary = reactive({ total: 0, enabled: 0, tg_entries: 0, last_poll: 0 })
 const channels = ref([])
 
@@ -156,6 +168,43 @@ onMounted(async () => {
 <style scoped>
 .qc-detail {
   padding: 14px 16px 28px;
+}
+
+.qc-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.qc-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  object-fit: cover;
+}
+
+.qc-head-text {
+  min-width: 0;
+}
+
+.qc-title {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.qc-meta {
+  font-size: 12px;
+  color: rgba(var(--v-theme-on-surface), 0.6);
+  margin-top: 2px;
+}
+
+.qc-desc {
+  font-size: 13px;
+  color: rgba(var(--v-theme-on-surface), 0.72);
+  line-height: 1.6;
+  margin-top: 10px;
+  margin-bottom: 14px;
 }
 
 @media (max-width: 599px) {

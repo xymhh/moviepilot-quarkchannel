@@ -10,14 +10,6 @@
           这里只保留全局下载与 Telegram 凭据；盘搜和频道请到「渠道管理」维护。
         </p>
       </div>
-      <v-btn
-        class="save-button"
-        color="primary"
-        variant="flat"
-        prepend-icon="mdi-content-save-outline"
-        @click="save">
-        保存设置
-      </v-btn>
     </div>
 
     <v-tabs
