@@ -9,3 +9,4 @@ data/
 frontend/node_modules/
 /*_TODO.md
 .DS_Store
+.ref/

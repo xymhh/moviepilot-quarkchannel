@@ -1,14 +1,29 @@
 <template>
-  <div class="channel-page">
-    <div class="page-head">
-      <div class="page-title">
-        <div class="title-row">
-          <v-icon icon="mdi-rss" color="primary" size="26" />
-          <h2 class="text-h6 font-weight-bold mb-0">渠道管理</h2>
-        </div>
-        <p class="text-body-2 text-medium-emphasis mt-1 mb-0">
-          统一维护盘搜与 Telegram 频道，启用后自动参与搜索和增量同步。
-        </p>
+  <div class="channel-page" :class="{ 'channel-page--batch-mobile': isMobile && selectedIds.length }">
+    <div class="toolbar" :class="{ 'toolbar--mobile': isMobile }">
+      <div class="toolbar-filters">
+        <v-text-field
+          v-model="search"
+          class="search-field"
+          density="compact"
+          variant="outlined"
+          hide-details
+          clearable
+          prepend-inner-icon="mdi-magnify"
+          placeholder="搜索名称、类型、频道或地址"
+          aria-label="搜索渠道" />
+        <v-btn-toggle
+          v-model="statusFilter"
+          mandatory
+          divided
+          color="primary"
+          density="comfortable"
+          variant="outlined"
+          class="status-toggle">
+          <v-btn value="all">全部</v-btn>
+          <v-btn value="enabled">已启用</v-btn>
+          <v-btn value="disabled">已停用</v-btn>
+        </v-btn-toggle>
       </div>
       <v-btn
         class="add-button"
@@ -29,201 +44,231 @@
       </div>
     </v-alert>
 
-    <v-row dense class="stats-row">
-      <v-col v-for="card in statCards" :key="card.label" cols="6" md="3">
-        <v-card variant="tonal" :color="card.color" class="stat-card">
-          <v-card-text class="stat-content">
-            <v-icon :icon="card.icon" size="22" />
-            <div class="stat-copy">
-              <div class="stat-label">{{ card.label }}</div>
-              <div class="stat-value" :class="{ 'stat-value-small': card.small }">{{ card.value }}</div>
+    <v-slide-y-transition>
+      <div
+        v-if="selectedIds.length"
+        class="batch-bar"
+        :class="{ 'batch-bar--mobile': isMobile }">
+        <div class="batch-count">已选 {{ selectedIds.length }} 项</div>
+        <div class="batch-actions">
+          <v-btn
+            size="small"
+            variant="tonal"
+            color="success"
+            prepend-icon="mdi-check-circle-outline"
+            :loading="batchBusy && batchAction === 'enable'"
+            :disabled="batchBusy"
+            @click="batchSetEnabled(true)">
+            启用
+          </v-btn>
+          <v-btn
+            size="small"
+            variant="tonal"
+            color="warning"
+            prepend-icon="mdi-stop-circle-outline"
+            :loading="batchBusy && batchAction === 'disable'"
+            :disabled="batchBusy"
+            @click="batchSetEnabled(false)">
+            停用
+          </v-btn>
+          <v-btn size="small" variant="text" :disabled="batchBusy" @click="clearSelection">
+            清空选择
+          </v-btn>
+        </div>
+      </div>
+    </v-slide-y-transition>
+
+    <div v-if="!loading && !filteredRows.length" class="empty-state">
+      <v-icon :icon="rows.length ? 'mdi-filter-off-outline' : 'mdi-rss'" size="46" color="primary" />
+      <div class="empty-title">
+        {{ rows.length ? "没有匹配的渠道" : "还没有渠道，先新增一个" }}
+      </div>
+      <div class="empty-hint">
+        {{ rows.length ? "试试调整搜索关键词或状态筛选。" : "新增盘搜服务或 Telegram 频道后即可参与搜索。" }}
+      </div>
+      <v-btn
+        v-if="!rows.length"
+        color="primary"
+        variant="tonal"
+        prepend-icon="mdi-plus"
+        @click="openCreate">
+        新增渠道
+      </v-btn>
+      <v-btn v-else variant="text" @click="resetFilters">清空筛选</v-btn>
+    </div>
+
+    <v-row v-else dense class="channel-grid">
+      <v-col v-for="item in filteredRows" :key="item.id" cols="12" sm="6" md="4" lg="3">
+        <v-card
+          variant="outlined"
+          class="channel-card"
+          :class="{
+            'channel-card--selected': isSelected(item.id),
+            'channel-card--disabled': !item.enabled,
+          }">
+          <div class="card-head">
+            <v-checkbox-btn
+              :model-value="isSelected(item.id)"
+              class="card-checkbox"
+              color="primary"
+              density="compact"
+              hide-details
+              :aria-label="`选择渠道 ${item.name}`"
+              @click.stop
+              @update:model-value="toggleSelect(item.id, $event)" />
+            <div class="card-heading" @click="openDetail(item)">
+              <div class="card-title-line">
+                <v-tooltip :text="item.name" location="top" open-delay="400" max-width="280">
+                  <template #activator="{ props: tooltipProps }">
+                    <span v-bind="tooltipProps" class="card-title">{{ item.name }}</span>
+                  </template>
+                </v-tooltip>
+                <v-chip :color="typeColor(item.type)" variant="tonal" size="x-small" class="type-chip">
+                  {{ typeLabel(item.type) }}
+                </v-chip>
+              </div>
             </div>
-          </v-card-text>
+          </div>
+
+          <div class="card-body" @click="openDetail(item)">
+            <div class="endpoint" :title="endpointFull(item)">{{ endpointText(item) }}</div>
+            <div class="card-meta-line">优先级 {{ item.priority }}</div>
+          </div>
+
+          <div class="status-row">
+            <v-chip
+              :color="item.enabled ? 'success' : undefined"
+              :variant="item.enabled ? 'tonal' : 'outlined'"
+              size="small">
+              {{ item.enabled ? "已启用" : "已停用" }}
+            </v-chip>
+            <span class="status-item">
+              <v-icon icon="mdi-clock-outline" size="13" />
+              {{ formatRelativeTime(item.last_scan) }}
+            </span>
+            <span class="status-item">
+              <v-icon icon="mdi-target" size="13" />
+              命中 {{ item.hits }}
+            </span>
+            <v-tooltip
+              v-if="item.last_error"
+              :text="item.last_error"
+              location="top"
+              max-width="300">
+              <template #activator="{ props: tooltipProps }">
+                <v-chip
+                  v-bind="tooltipProps"
+                  color="error"
+                  variant="tonal"
+                  size="small"
+                  prepend-icon="mdi-alert-circle-outline"
+                  class="error-chip">
+                  异常
+                </v-chip>
+              </template>
+            </v-tooltip>
+          </div>
+
+          <v-divider class="card-divider" />
+
+          <div class="card-actions">
+            <v-tooltip text="测试渠道" location="top">
+              <template #activator="{ props: tooltipProps }">
+                <v-btn
+                  v-bind="tooltipProps"
+                  icon="mdi-access-point"
+                  size="small"
+                  variant="text"
+                  color="primary"
+                  :loading="testingId === item.id"
+                  @click.stop="testChannel(item)" />
+              </template>
+            </v-tooltip>
+            <v-tooltip
+              :text="item.type === 'tg_channel' ? '立即扫描' : '盘搜渠道不支持扫描'"
+              location="top">
+              <template #activator="{ props: tooltipProps }">
+                <span v-bind="tooltipProps" class="action-slot">
+                  <v-btn
+                    icon="mdi-radar"
+                    size="small"
+                    variant="text"
+                    color="info"
+                    :disabled="item.type !== 'tg_channel'"
+                    :loading="scanningId === item.id"
+                    @click.stop="scanChannel(item)" />
+                </span>
+              </template>
+            </v-tooltip>
+            <v-tooltip text="编辑渠道" location="top">
+              <template #activator="{ props: tooltipProps }">
+                <v-btn
+                  v-bind="tooltipProps"
+                  icon="mdi-pencil"
+                  size="small"
+                  variant="text"
+                  @click.stop="openEdit(item)" />
+              </template>
+            </v-tooltip>
+            <v-tooltip text="删除渠道" location="top">
+              <template #activator="{ props: tooltipProps }">
+                <v-btn
+                  v-bind="tooltipProps"
+                  icon="mdi-delete"
+                  size="small"
+                  variant="text"
+                  color="error"
+                  @click.stop="askDelete(item)" />
+              </template>
+            </v-tooltip>
+          </div>
         </v-card>
       </v-col>
     </v-row>
 
-    <v-card v-if="!loading && !rows.length" variant="outlined" class="empty-card">
-      <v-card-text class="empty-content">
-        <v-icon icon="mdi-rss-box" size="42" color="primary" />
-        <div class="text-subtitle-1 font-weight-medium">还没有渠道</div>
-        <div class="text-body-2 text-medium-emphasis">新增盘搜服务或 Telegram 频道后即可参与搜索。</div>
-        <v-btn color="primary" variant="tonal" prepend-icon="mdi-plus" @click="openCreate">
-          新增第一个渠道
-        </v-btn>
-      </v-card-text>
-    </v-card>
-
-    <v-data-table
-      v-if="!isMobile && rows.length"
-      :headers="headers"
-      :items="rows"
-      item-value="id"
-      :items-per-page="-1"
-      hide-default-footer
-      density="compact"
-      class="channels-table">
-      <template #item.name="{ item }">
-        <div class="name-cell">
-          <v-avatar :color="typeColor(item.type)" variant="tonal" size="34">
-            <v-icon :icon="typeIcon(item.type)" size="18" />
-          </v-avatar>
-          <div class="name-copy">
-            <div class="text-body-2 font-weight-medium text-truncate">{{ item.name }}</div>
-            <div class="text-caption text-medium-emphasis text-truncate">{{ channelSubtitle(item) }}</div>
+    <v-navigation-drawer
+      v-model="detailOpen"
+      temporary
+      location="right"
+      :width="isMobile ? '88vw' : 380"
+      class="detail-drawer">
+      <div class="detail-drawer-inner">
+        <div class="drawer-head">
+          <div class="drawer-heading">
+            <div class="drawer-kicker">渠道详情</div>
+            <div class="drawer-title">{{ detailChannel?.name || "渠道" }}</div>
           </div>
+          <v-btn icon="mdi-close" variant="text" size="small" title="关闭" @click="detailOpen = false" />
         </div>
-      </template>
-      <template #item.type="{ item }">
-        <v-chip :color="typeColor(item.type)" variant="tonal" size="small">
-          {{ typeLabel(item.type) }}
-        </v-chip>
-      </template>
-      <template #item.priority="{ item }">
-        <span class="text-body-2">{{ item.priority }}</span>
-      </template>
-      <template #item.enabled="{ item }">
-        <v-switch
-          :model-value="item.enabled"
-          :loading="Boolean(toggling[item.id])"
-          color="primary"
-          density="compact"
-          hide-details
-          @update:model-value="toggleEnabled(item, $event)" />
-      </template>
-      <template #item.last_scan="{ item }">
-        <span class="text-body-2">{{ formatTime(item.last_scan) }}</span>
-      </template>
-      <template #item.hits="{ item }">
-        <span class="text-body-2">{{ item.hits }}</span>
-      </template>
-      <template #item.actions="{ item }">
-        <div class="table-actions">
-          <v-btn
-            icon="mdi-access-point-check"
-            size="small"
-            variant="text"
-            color="primary"
-            title="测试渠道"
-            :loading="testingId === item.id"
-            @click="testChannel(item)" />
-          <v-btn
-            v-if="item.type === 'tg_channel'"
-            icon="mdi-radar"
-            size="small"
-            variant="text"
-            color="info"
-            title="立即扫描"
-            :loading="scanningId === item.id"
-            @click="scanChannel(item)" />
-          <v-btn
-            icon="mdi-pencil-outline"
-            size="small"
-            variant="text"
-            title="编辑渠道"
-            @click="openEdit(item)" />
-          <v-btn
-            icon="mdi-delete-outline"
-            size="small"
-            variant="text"
-            color="error"
-            title="删除渠道"
-            @click="askDelete(item)" />
-        </div>
-      </template>
-    </v-data-table>
-
-    <div v-if="isMobile && rows.length" class="mobile-list">
-      <v-card v-for="item in rows" :key="item.id" variant="outlined" class="mobile-card">
-        <div class="mobile-card-head">
-          <div class="name-cell">
-            <v-avatar :color="typeColor(item.type)" variant="tonal" size="36">
-              <v-icon :icon="typeIcon(item.type)" size="19" />
-            </v-avatar>
-            <div class="name-copy">
-              <div class="mobile-name">{{ item.name }}</div>
-              <div class="text-caption text-medium-emphasis">{{ channelSubtitle(item) }}</div>
+        <v-divider />
+        <div class="drawer-body">
+          <div v-if="detailChannel" class="drawer-chips">
+            <v-chip :color="typeColor(detailChannel.type)" variant="tonal" size="small">
+              {{ typeLabel(detailChannel.type) }}
+            </v-chip>
+            <v-chip
+              :color="detailChannel.enabled ? 'success' : undefined"
+              :variant="detailChannel.enabled ? 'tonal' : 'outlined'"
+              size="small">
+              {{ detailChannel.enabled ? "已启用" : "已停用" }}
+            </v-chip>
+          </div>
+          <div v-if="detailChannel" class="detail-list">
+            <div v-for="row in detailRows" :key="row.label" class="detail-item">
+              <div class="detail-label">{{ row.label }}</div>
+              <div class="detail-value">{{ row.value }}</div>
             </div>
           </div>
-          <v-switch
-            :model-value="item.enabled"
-            :loading="Boolean(toggling[item.id])"
-            color="primary"
-            density="compact"
-            hide-details
-            @update:model-value="toggleEnabled(item, $event)" />
         </div>
-
-        <div class="mobile-meta">
-          <div class="meta-item">
-            <div class="meta-label">类型</div>
-            <div class="meta-value">
-              <v-chip :color="typeColor(item.type)" variant="tonal" size="small">
-                {{ typeLabel(item.type) }}
-              </v-chip>
-            </div>
-          </div>
-          <div class="meta-item">
-            <div class="meta-label">优先级</div>
-            <div class="meta-value">{{ item.priority }}</div>
-          </div>
-          <div class="meta-item">
-            <div class="meta-label">最近扫描</div>
-            <div class="meta-value">{{ formatTime(item.last_scan) }}</div>
-          </div>
-          <div class="meta-item">
-            <div class="meta-label">命中</div>
-            <div class="meta-value">{{ item.hits }}</div>
-          </div>
-        </div>
-
-        <v-alert
-          v-if="item.last_error"
-          type="error"
-          density="compact"
-          variant="tonal"
-          class="mt-3">
-          {{ item.last_error }}
-        </v-alert>
-
-        <div class="mobile-actions">
-          <v-btn
-            variant="tonal"
-            color="primary"
-            size="small"
-            prepend-icon="mdi-access-point-check"
-            :loading="testingId === item.id"
-            @click="testChannel(item)">
-            测试
-          </v-btn>
-          <v-btn
-            v-if="item.type === 'tg_channel'"
-            variant="tonal"
-            color="info"
-            size="small"
-            prepend-icon="mdi-radar"
-            :loading="scanningId === item.id"
-            @click="scanChannel(item)">
-            扫描
-          </v-btn>
-          <v-btn
-            variant="tonal"
-            size="small"
-            prepend-icon="mdi-pencil-outline"
-            @click="openEdit(item)">
+        <v-divider />
+        <div class="drawer-actions">
+          <v-btn variant="text" @click="detailOpen = false">关闭</v-btn>
+          <v-btn color="primary" variant="flat" prepend-icon="mdi-pencil" @click="editFromDetail">
             编辑
           </v-btn>
-          <v-btn
-            variant="tonal"
-            color="error"
-            size="small"
-            prepend-icon="mdi-delete-outline"
-            @click="askDelete(item)">
-            删除
-          </v-btn>
         </div>
-      </v-card>
-    </div>
+      </div>
+    </v-navigation-drawer>
 
     <v-dialog v-model="dialogVisible" :fullscreen="isMobile" max-width="760" scrollable>
       <v-card class="dialog-card">
@@ -464,8 +509,13 @@ const { isMobile } = useViewport(600)
 const loading = ref(false)
 const loadError = ref("")
 const items = ref([])
-const summary = reactive({ total: 0, enabled: 0, tg_entries: 0, last_poll: 0 })
-const toggling = reactive({})
+const search = ref("")
+const statusFilter = ref("all")
+const selectedIds = ref([])
+const batchBusy = ref(false)
+const batchAction = ref("")
+const detailOpen = ref(false)
+const detailChannel = ref(null)
 const testingId = ref("")
 const scanningId = ref("")
 const dialogVisible = ref(false)
@@ -475,16 +525,6 @@ const deleteVisible = ref(false)
 const deletingChannel = ref(null)
 const deleting = ref(false)
 const snackbar = reactive({ visible: false, text: "", color: "success" })
-
-const headers = [
-  { title: "名称", key: "name", sortable: true },
-  { title: "类型", key: "type", sortable: true },
-  { title: "优先级", key: "priority", sortable: true, align: "start" },
-  { title: "启用", key: "enabled", sortable: false, align: "center" },
-  { title: "最近扫描", key: "last_scan", sortable: false },
-  { title: "命中", key: "hits", sortable: false, align: "end" },
-  { title: "操作", key: "actions", sortable: false, align: "end" },
-]
 
 const typeOptions = [
   { title: "盘搜", value: "pansou" },
@@ -529,18 +569,59 @@ const rows = computed(() =>
   }),
 )
 
-const statCards = computed(() => [
-  { label: "渠道总数", value: summary.total, icon: "mdi-rss", color: "primary" },
-  { label: "已启用", value: summary.enabled, icon: "mdi-toggle-switch", color: "success" },
-  { label: "TG 索引条数", value: summary.tg_entries, icon: "mdi-database-eye", color: "info" },
-  {
-    label: "最近同步",
-    value: formatTime(summary.last_poll),
-    icon: "mdi-clock-check-outline",
-    color: "secondary",
-    small: true,
-  },
-])
+const filteredRows = computed(() => {
+  const keyword = search.value.trim().toLowerCase()
+  return rows.value.filter((item) => {
+    if (statusFilter.value === "enabled" && !item.enabled) return false
+    if (statusFilter.value === "disabled" && item.enabled) return false
+    if (!keyword) return true
+    const config = item.config || {}
+    return [
+      item.name,
+      item.type,
+      typeLabel(item.type),
+      config.channel,
+      config.base_url,
+    ].some((value) => String(value || "").toLowerCase().includes(keyword))
+  })
+})
+
+const detailRows = computed(() => {
+  const item = detailChannel.value
+  if (!item) return []
+  const config = item.config || {}
+  const result = [
+    { label: "名称", value: item.name || "未命名" },
+    { label: "类型", value: typeLabel(item.type) },
+    { label: "状态", value: item.enabled ? "已启用" : "已停用" },
+    { label: "优先级", value: String(item.priority ?? 0) },
+  ]
+  if (item.type === "pansou") {
+    result.push(
+      { label: "服务地址", value: config.base_url || "未配置" },
+      { label: "搜索来源", value: sourceLabel(config.src) },
+      { label: "账号", value: config.username || "未配置" },
+      { label: "访问令牌", value: config.token ? "已配置" : "未配置" },
+      { label: "指定插件", value: listText(config.plugins) },
+      { label: "网盘类型", value: listText(config.cloud_types) },
+    )
+  } else {
+    result.push(
+      { label: "频道标识", value: config.channel || "未配置" },
+      { label: "轮询间隔", value: `${Number(config.interval_minutes || 10)} 分钟` },
+      { label: "单次扫描", value: `${Number(config.scan_limit || 100)} 条` },
+      { label: "回补历史", value: config.backfill ? "已开启" : "已关闭" },
+    )
+  }
+  result.push(
+    { label: "最近扫描", value: formatRelativeTime(item.last_scan) },
+    { label: "命中次数", value: String(item.hits) },
+  )
+  if (item.last_error) {
+    result.push({ label: "最近错误", value: item.last_error })
+  }
+  return result
+})
 
 function notify(text, color = "success") {
   snackbar.text = String(text || "")
@@ -563,17 +644,9 @@ function request(method, path, data) {
   return fn.call(props.api, `plugin/${props.pluginId}${path}`, data)
 }
 
-function applySummary(data) {
-  if (!data || typeof data !== "object") return
-  summary.total = Number(data.total ?? summary.total) || 0
-  summary.enabled = Number(data.enabled ?? summary.enabled) || 0
-  summary.tg_entries = Number(data.tg_entries ?? summary.tg_entries) || 0
-  summary.last_poll = Number(data.last_poll ?? summary.last_poll) || 0
-}
-
-function syncSummaryFromItems() {
-  summary.total = items.value.length
-  summary.enabled = items.value.filter((item) => item.enabled).length
+function pruneSelection() {
+  const valid = new Set(items.value.map((item) => item.id))
+  selectedIds.value = selectedIds.value.filter((id) => valid.has(id))
 }
 
 async function loadData(options = {}) {
@@ -581,24 +654,21 @@ async function loadData(options = {}) {
   if (!silent) loading.value = true
   loadError.value = ""
   try {
-    const [listResult, summaryResult] = await Promise.allSettled([
-      request("get", "/channels"),
-      request("get", "/channels/summary"),
-    ])
-    if (listResult.status !== "fulfilled") {
-      throw listResult.reason
-    }
-    const body = unwrap(listResult.value)
+    const body = unwrap(await request("get", "/channels"))
     if (body.success === false) {
       throw new Error(body.message || "读取渠道失败")
     }
     const data = body.data || body
     items.value = Array.isArray(data?.items) ? data.items : []
-    if (summaryResult.status === "fulfilled") {
-      const summaryBody = unwrap(summaryResult.value)
-      applySummary(summaryBody.data || summaryBody)
-    } else {
-      syncSummaryFromItems()
+    pruneSelection()
+    if (detailChannel.value) {
+      const fresh = rows.value.find((item) => item.id === detailChannel.value.id)
+      if (fresh) {
+        detailChannel.value = fresh
+      } else {
+        detailOpen.value = false
+        detailChannel.value = null
+      }
     }
   } catch (error) {
     loadError.value = `读取渠道失败：${error?.message || error}`
@@ -608,41 +678,83 @@ async function loadData(options = {}) {
   }
 }
 
-async function refreshSummary() {
-  try {
-    const body = unwrap(await request("get", "/channels/summary"))
-    applySummary(body.data || body)
-  } catch (error) {
-    syncSummaryFromItems()
-  }
-}
-
 function typeLabel(type) {
   return type === "tg_channel" ? "TG 频道" : "盘搜"
-}
-
-function typeIcon(type) {
-  return type === "tg_channel" ? "mdi-television-guide" : "mdi-magnify"
 }
 
 function typeColor(type) {
   return type === "tg_channel" ? "info" : "primary"
 }
 
-function channelSubtitle(item) {
+function sourceLabel(value) {
+  return sourceOptions.find((option) => option.value === value)?.title || "全部来源"
+}
+
+function listText(value) {
+  const list = Array.isArray(value) ? value.filter(Boolean) : []
+  return list.length ? list.join("，") : "全部"
+}
+
+function endpointFull(item) {
   if (item.type === "tg_channel") {
     return item.config?.channel || "未配置频道"
   }
   return item.config?.base_url || "未配置服务地址"
 }
 
-function formatTime(value) {
+function ellipsisMiddle(value, maxLength = 30) {
+  const text = String(value || "")
+  if (text.length <= maxLength) return text
+  const keep = Math.max(1, Math.floor((maxLength - 1) / 2))
+  return `${text.slice(0, keep)}…${text.slice(-keep)}`
+}
+
+function endpointText(item) {
+  const text = endpointFull(item)
+  return item.type === "tg_channel" ? ellipsisMiddle(text) : text
+}
+
+function formatRelativeTime(value) {
   const timestamp = Number(value || 0)
-  if (!timestamp) return "尚未同步"
-  const date = new Date(timestamp * 1000)
-  if (Number.isNaN(date.getTime())) return "尚未同步"
-  const pad = (number) => String(number).padStart(2, "0")
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+  if (!timestamp) return "从未"
+  const diff = Math.max(0, Math.floor(Date.now() / 1000 - timestamp))
+  if (diff < 60) return "刚刚"
+  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`
+  return `${Math.floor(diff / 3600)} 小时前`
+}
+
+function isSelected(channelId) {
+  return selectedIds.value.includes(channelId)
+}
+
+function toggleSelect(channelId, selected) {
+  if (selected) {
+    if (!selectedIds.value.includes(channelId)) {
+      selectedIds.value = [...selectedIds.value, channelId]
+    }
+    return
+  }
+  selectedIds.value = selectedIds.value.filter((id) => id !== channelId)
+}
+
+function clearSelection() {
+  selectedIds.value = []
+}
+
+function resetFilters() {
+  search.value = ""
+  statusFilter.value = "all"
+}
+
+function openDetail(item) {
+  detailChannel.value = item
+  detailOpen.value = true
+}
+
+function editFromDetail() {
+  const item = detailChannel.value
+  detailOpen.value = false
+  if (item) openEdit(item)
 }
 
 function resetForm() {
@@ -762,28 +874,34 @@ function setLocalEnabled(channelId, enabled) {
   if (channel) channel.enabled = Boolean(enabled)
 }
 
-async function toggleEnabled(item, enabled) {
-  const channelId = item.id
-  if (toggling[channelId]) return
-  const next = Boolean(enabled)
-  const previous = Boolean(item.enabled)
-  toggling[channelId] = true
-  setLocalEnabled(channelId, next)
-  try {
-    const body = unwrap(
-      await request("put", `/channels/${encodeURIComponent(channelId)}`, { enabled: next }),
-    )
-    if (body.success === false) {
-      throw new Error(body.message || "更新失败")
+async function batchSetEnabled(enabled) {
+  if (batchBusy.value || !selectedIds.value.length) return
+  batchBusy.value = true
+  batchAction.value = enabled ? "enable" : "disable"
+  const ids = [...selectedIds.value]
+  let success = 0
+  let failed = 0
+  for (const channelId of ids) {
+    try {
+      const body = unwrap(
+        await request("put", `/channels/${encodeURIComponent(channelId)}`, { enabled }),
+      )
+      if (body.success === false) {
+        throw new Error(body.message || "更新失败")
+      }
+      setLocalEnabled(channelId, enabled)
+      success += 1
+    } catch (error) {
+      failed += 1
     }
-    notify(next ? "渠道已启用" : "渠道已停用")
-    await refreshSummary()
-  } catch (error) {
-    setLocalEnabled(channelId, previous)
-    notify(`更新失败：${error?.message || error}`, "error")
-  } finally {
-    delete toggling[channelId]
   }
+  batchBusy.value = false
+  batchAction.value = ""
+  notify(
+    `批量${enabled ? "启用" : "停用"}完成：成功 ${success} / 失败 ${failed}`,
+    failed ? "warning" : "success",
+  )
+  await loadData({ silent: true })
 }
 
 async function testChannel(item) {
@@ -833,6 +951,10 @@ async function confirmDelete() {
     if (body.success === false) {
       throw new Error(body.message || "删除失败")
     }
+    if (detailChannel.value?.id === channel.id) {
+      detailOpen.value = false
+      detailChannel.value = null
+    }
     deleteVisible.value = false
     deletingChannel.value = null
     notify("渠道已删除")
@@ -856,61 +978,36 @@ onMounted(loadData)
 .channel-page {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
   padding-bottom: 24px;
 }
 
-.page-head {
+.toolbar {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
+  align-items: center;
+  gap: 12px;
 }
 
-.page-title {
+.toolbar-filters {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
   min-width: 0;
 }
 
-.title-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+.search-field {
+  flex: 1 1 280px;
+  max-width: 380px;
+  min-width: 200px;
 }
 
-.stats-row {
-  margin-top: -4px;
+.status-toggle {
+  flex: 0 0 auto;
 }
 
-.stat-card {
-  height: 100%;
-}
-
-.stat-content {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 14px;
-}
-
-.stat-copy {
-  min-width: 0;
-}
-
-.stat-label {
-  font-size: 12px;
-  opacity: 0.72;
-}
-
-.stat-value {
-  font-size: 22px;
-  line-height: 1.25;
-  font-weight: 700;
-}
-
-.stat-value-small {
-  font-size: 13px;
-  font-weight: 600;
-  word-break: break-all;
+.add-button {
+  flex: 0 0 auto;
 }
 
 .alert-row {
@@ -921,96 +1018,255 @@ onMounted(loadData)
   flex-wrap: wrap;
 }
 
-.empty-card {
-  border-style: dashed;
+.batch-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 1px solid rgba(var(--v-theme-primary), 0.22);
+  border-radius: 10px;
+  background: rgba(var(--v-theme-primary), 0.08);
 }
 
-.empty-content {
+.batch-count {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.batch-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.empty-state {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 10px;
-  padding: 40px 18px;
+  padding: 54px 18px;
+  border: 1px dashed rgba(var(--v-theme-on-surface), 0.24);
+  border-radius: 12px;
   text-align: center;
 }
 
-.channels-table :deep(.v-data-table__td) {
-  vertical-align: middle;
+.empty-title {
+  font-size: 16px;
+  font-weight: 600;
 }
 
-.name-cell {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
+.empty-hint {
+  max-width: 360px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: rgba(var(--v-theme-on-surface), 0.64);
 }
 
-.name-copy {
-  min-width: 0;
+.channel-grid {
+  margin-top: -4px;
 }
 
-.table-actions {
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  gap: 2px;
-  flex-wrap: nowrap;
-}
-
-.mobile-list {
+.channel-card {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  height: 100%;
+  overflow: hidden;
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    border-color 0.18s ease;
 }
 
-.mobile-card {
-  padding: 14px;
+.channel-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.09);
 }
 
-.mobile-card-head {
+.channel-card--selected {
+  border-color: rgb(var(--v-theme-primary)) !important;
+  box-shadow: 0 0 0 1px rgba(var(--v-theme-primary), 0.4);
+}
+
+.channel-card--disabled .card-body,
+.channel-card--disabled .status-row {
+  opacity: 0.78;
+}
+
+.card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 8px 0;
+}
+
+.card-checkbox {
+  flex: 0 0 auto;
+  margin-top: -2px;
+}
+
+.card-heading {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px 0 0;
+  cursor: pointer;
+}
+
+.card-title-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.card-title {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.type-chip {
+  flex: 0 0 auto;
+}
+
+.card-body {
+  min-height: 42px;
+  padding: 6px 14px 0 42px;
+  cursor: pointer;
+}
+
+.endpoint {
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.45;
+  color: rgba(var(--v-theme-on-surface), 0.7);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-meta-line {
+  margin-top: 4px;
+  font-size: 12px;
+  color: rgba(var(--v-theme-on-surface), 0.55);
+}
+
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 10px 14px 10px 42px;
+}
+
+.status-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 12px;
+  color: rgba(var(--v-theme-on-surface), 0.64);
+}
+
+.error-chip {
+  cursor: help;
+}
+
+.card-divider {
+  margin-top: auto;
+}
+
+.card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  padding: 2px 6px;
+}
+
+.action-slot {
+  display: inline-flex;
+}
+
+.detail-drawer-inner {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.drawer-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 8px;
+  gap: 12px;
+  padding: 16px;
 }
 
-.mobile-name {
-  max-width: 62vw;
-  font-size: 15px;
-  font-weight: 600;
-  word-break: break-all;
-}
-
-.mobile-meta {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 12px;
-}
-
-.meta-item {
+.drawer-heading {
   min-width: 0;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: rgba(var(--v-theme-on-surface), 0.04);
 }
 
-.meta-label {
+.drawer-kicker {
   font-size: 12px;
-  color: rgba(var(--v-theme-on-surface), 0.62);
+  color: rgba(var(--v-theme-on-surface), 0.6);
 }
 
-.meta-value {
+.drawer-title {
   margin-top: 2px;
-  font-size: 13px;
-  word-break: break-all;
+  overflow: hidden;
+  font-size: 17px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.mobile-actions {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+.drawer-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.drawer-chips {
+  display: flex;
   gap: 8px;
-  margin-top: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.detail-list {
+  border-top: 1px solid rgba(var(--v-theme-on-surface), 0.1);
+}
+
+.detail-item {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(var(--v-theme-on-surface), 0.08);
+}
+
+.detail-label {
+  font-size: 12px;
+  color: rgba(var(--v-theme-on-surface), 0.6);
+}
+
+.detail-value {
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.drawer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px));
 }
 
 .dialog-title {
@@ -1045,23 +1301,66 @@ onMounted(loadData)
 }
 
 @media (max-width: 599px) {
-  .page-head {
+  .toolbar--mobile {
     flex-direction: column;
     align-items: stretch;
   }
 
-  .add-button {
+  .toolbar--mobile .toolbar-filters {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .toolbar--mobile .search-field {
+    max-width: none;
+    min-width: 0;
     width: 100%;
   }
 
+  .toolbar--mobile .status-toggle {
+    width: 100%;
+  }
+
+  .toolbar--mobile .status-toggle :deep(.v-btn) {
+    flex: 1;
+  }
+
+  .toolbar--mobile .add-button {
+    width: 100%;
+  }
+
+  .batch-bar--mobile {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 6;
+    margin: 0 8px;
+    padding: 12px 14px calc(12px + env(safe-area-inset-bottom, 0px));
+    border-radius: 14px 14px 0 0;
+    box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.18);
+  }
+
+  .batch-bar--mobile .batch-actions {
+    justify-content: flex-end;
+  }
+
+  .channel-page--batch-mobile {
+    padding-bottom: 96px;
+  }
+
+  .detail-item {
+    grid-template-columns: 82px minmax(0, 1fr);
+  }
+
   .dialog-body {
-    padding-left: 16px;
     padding-right: 16px;
+    padding-left: 16px;
   }
 
   .dialog-actions {
-    padding-left: 16px;
     padding-right: 16px;
+    padding-left: 16px;
   }
 }
 </style>
