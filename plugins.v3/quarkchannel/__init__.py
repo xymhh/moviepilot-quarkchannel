@@ -85,7 +85,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.11.1"
+    plugin_version = "0.11.2"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -422,6 +422,13 @@ class QuarkChannel(_PluginBase):
                 "methods": ["POST"],
                 "auth": "bear",
                 "summary": "清理过期分享缓存",
+            },
+            {
+                "path": "/search_test",
+                "endpoint": self.api_search_test,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "直接调用搜索链，查看返回的条目（排障用）",
             },
             {
                 "path": "/auto_pick",
@@ -788,17 +795,26 @@ class QuarkChannel(_PluginBase):
         missing_inline = [
             item for item in candidates
             if item.get("url") and not self._cached_entry(item.get("sid", ""))
-        ][:2]
+        ][:4]
         if missing_inline:
-            from concurrent.futures import ThreadPoolExecutor
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FTimeout
 
-            with ThreadPoolExecutor(max_workers=len(missing_inline)) as pool:
-                list(pool.map(
-                    lambda item: self._ensure_entry(
-                        item["url"], item.get("passcode", ""), item.get("title", "")
-                    ),
-                    missing_inline,
-                ))
+            pool = ThreadPoolExecutor(max_workers=len(missing_inline))
+            futures = [
+                pool.submit(
+                    self._ensure_entry, item["url"],
+                    item.get("passcode", ""), item.get("title", ""),
+                )
+                for item in missing_inline
+            ]
+            for future in futures:
+                try:
+                    future.result(timeout=6)
+                except _FTimeout:
+                    logger.warning("分享快照超时，本次按整包返回")
+                except Exception as error:  # noqa: BLE001 - 单条失败不影响其它候选
+                    logger.debug(f"分享快照失败：{type(error).__name__}")
+            pool.shutdown(wait=False)
         results: list[TorrentInfo] = []
         for candidate in candidates:
             results.extend(self._results_for_candidate(candidate, mtype))
@@ -1493,6 +1509,28 @@ class QuarkChannel(_PluginBase):
                 "last_poll": float(getattr(index, "last_poll", 0.0) or 0.0) if index is not None else 0.0,
             },
         }
+
+    def api_search_test(self, payload: Optional[dict] = None) -> dict:
+        """按关键词跑一次 search_torrents，返回标题/大小/种子地址（排障用）。
+
+        :param payload: {"keyword": "...", "limit": 5}
+        :return: 条目列表
+        """
+        payload = payload or {}
+        keyword = str(payload.get("keyword") or "").strip()
+        if not keyword:
+            return {"success": False, "message": "缺少 keyword"}
+        items = self.search_torrents(keyword=keyword, page=0)
+        rows = [
+            {
+                "title": item.title,
+                "size": item.size,
+                "site": item.site_name,
+                "enclosure": (item.enclosure or "")[:120],
+            }
+            for item in items[: int(payload.get("limit") or 20)]
+        ]
+        return {"success": True, "data": {"keyword": keyword, "count": len(items), "items": rows}}
 
     def api_auto_pick(self) -> dict:
         """返回自动追更开关与最近决策记录。"""
