@@ -1,5 +1,17 @@
 <template>
   <div class="qc-detail">
+    <div v-if="plugin.plugin_name || plugin.name" class="text-subtitle-1 mb-1">
+      {{ plugin.plugin_name || plugin.name }}
+    </div>
+    <div v-if="plugin.plugin_desc || plugin.description" class="text-body-2 text-medium-emphasis mb-2">
+      {{ plugin.plugin_desc || plugin.description }}
+    </div>
+    <div v-if="plugin.plugin_version || plugin.author" class="text-caption text-medium-emphasis mb-3">
+      <span v-if="plugin.plugin_version">v{{ plugin.plugin_version }}</span>
+      <span v-if="plugin.plugin_version && plugin.author"> · </span>
+      <span v-if="plugin.plugin_author || plugin.author">{{ plugin.plugin_author || plugin.author }}</span>
+    </div>
+
     <v-row dense class="mb-3">
       <v-col cols="6" sm="3">
         <v-chip size="small" variant="tonal" color="primary" prepend-icon="mdi-rss">
@@ -23,7 +35,7 @@
       </v-col>
     </v-row>
 
-    <v-btn block color="primary" prepend-icon="mdi-open-in-new" class="mb-3" @click="openChannels">
+    <v-btn variant="tonal" prepend-icon="mdi-open-in-new" class="mb-3" @click="openChannels">
       打开渠道管理
     </v-btn>
 
@@ -59,8 +71,12 @@
     </v-card>
 
     <div class="text-caption text-medium-emphasis mt-3">
-      详细参数在「设置 → 插件 → 网盘直链频道」；渠道增删改在「渠道管理」。
+      渠道增删改在「渠道管理」；全局参数点右下角齿轮进入设置。
     </div>
+
+    <button class="qc-fab" type="button" title="设置" @click="emit('switch')">
+      <v-icon icon="mdi-cog" size="26" />
+    </button>
   </div>
 </template>
 
@@ -72,6 +88,10 @@ const props = defineProps({
   pluginId: { type: String, default: "QuarkChannel" },
   navKey: { type: String, default: "main" },
 })
+
+const emit = defineEmits(["switch", "close"])
+
+const plugin = ref({})
 
 const summary = reactive({ total: 0, enabled: 0, tg_entries: 0, last_poll: 0 })
 const channels = ref([])
@@ -104,6 +124,14 @@ function openChannels() {
 
 onMounted(async () => {
   try {
+    const raw = await props.api.get("plugin")
+    const body = raw?.data ?? raw ?? {}
+    const list = Array.isArray(body) ? body : body.items || []
+    plugin.value = list.find((item) => item.id === props.pluginId) || {}
+  } catch (error) {
+    plugin.value = {}
+  }
+  try {
     const rawSummary = await props.api.get(`plugin/${props.pluginId}/channels/summary`)
     const body = unwrap(rawSummary)
     Object.assign(summary, {
@@ -128,5 +156,30 @@ onMounted(async () => {
 <style scoped>
 .qc-detail {
   padding: 4px 0 8px;
+}
+
+.qc-fab {
+  position: fixed;
+  right: 14px;
+  bottom: calc(88px + env(safe-area-inset-bottom, 0px));
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  background: rgb(var(--v-theme-primary));
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.28);
+  z-index: 1005;
+  cursor: pointer;
+}
+
+@media (min-width: 600px) {
+  .qc-fab {
+    bottom: 28px;
+    right: 24px;
+  }
 }
 </style>
