@@ -87,7 +87,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.12.7"
+    plugin_version = "0.12.6"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -858,7 +858,7 @@ class QuarkChannel(_PluginBase):
         else:
             results = []
             if bool(self._config.get("expand_in_search", True)):
-                results.extend(self._expanded_results(candidates, mtype, base_title=keyword))
+                results.extend(self._expanded_results(candidates, mtype))
             else:
                 for candidate in candidates:
                     results.extend(self._results_for_candidate(candidate, mtype))
@@ -1124,14 +1124,12 @@ class QuarkChannel(_PluginBase):
             title = f"{share_title} {self._episode_label(file_name, episode)}".strip()
             results.append(self._make_torrent(
                 candidate, title, size, int(candidate.get("expand_pri") or 5),
-                str(item.get("fid") or ""), mtype,
-                f"单集 · {file_name} · {share_title[:40]}",
+                str(item.get("fid") or ""), mtype, f"单集 · {file_name}",
             ))
         return results
 
     def _expanded_results(self, candidates: list[dict],
-                           mtype: Optional[MediaType],
-                           base_title: str = "") -> list[TorrentInfo]:
+                           mtype: Optional[MediaType]) -> list[TorrentInfo]:
         """把候选按集号合并展开：同一集保留体积最大的版本，集数完整不重复。"""
         merged: dict[int, tuple[float, dict, dict]] = {}
         packs: list[TorrentInfo] = []
@@ -1165,13 +1163,11 @@ class QuarkChannel(_PluginBase):
         limit = self._expand_limit()
         for episode, (size, item, candidate) in sorted(merged.items())[:limit or None]:
             file_name = str(item.get("name") or "file")
-            share_title = str(candidate.get("title") or "").strip()
-            display = (str(base_title).strip() or self._clean_title(share_title))[:80]
-            title = f"{display} {self._episode_label(file_name, episode)}".strip()
+            share_title = self._clean_title(str(candidate.get("title") or ""))
+            title = f"{share_title} {self._episode_label(file_name, episode)}".strip()
             results.append(self._make_torrent(
                 candidate, title, size, int(candidate.get("expand_pri") or 5),
-                str(item.get("fid") or ""), mtype,
-                f"单集 · {file_name} · {share_title[:40]}",
+                str(item.get("fid") or ""), mtype, f"单集 · {file_name}",
             ))
         results.extend(packs)
         return results
@@ -1204,16 +1200,17 @@ class QuarkChannel(_PluginBase):
 
     @staticmethod
     def _clean_title(text: str) -> str:
-        """仅去掉明显的发布标记，保留片名与画质信息。
+        """清理分享标题里的发布标记，方便 MoviePilot 识别片名与集号。
 
         :param text: 原始分享标题
         :return: 精简后的标题
         """
         raw = str(text or "")
-        raw = re.sub(r"(?:名称[:：]\s*)", "", raw)
+        raw = re.sub(r"[【\[][^】\]]*[】\]]", " ", raw)
+        raw = re.sub(r"(?:名称[:：]|全集|完结|已完结|更至\s*\d+\s*集|更新至\s*\d+\s*集|全\s*\d+\s*集)", " ", raw)
         raw = re.sub(r"[#＃]\S+", " ", raw)
         raw = " ".join(raw.split())
-        return raw[:100] or "video"
+        return raw[:80] or str(text or "video")[:80]
 
     def _expand_limit(self) -> int:
         """单次搜索最多展开多少集；0 表示不限制（默认完整展开）。"""
