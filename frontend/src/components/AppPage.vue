@@ -1,9 +1,6 @@
 <template>
   <div class="qc-page">
-    <template v-if="navKey === 'settings'">
-      <ConfigPanel :api="api" :plugin-id="pluginId" :initial-config="config" @save="saveConfig" />
-    </template>
-    <template v-else>
+    <template>
     <v-row dense class="mb-2">
       <v-col cols="6" sm="3">
         <v-chip size="small" variant="tonal" color="primary" prepend-icon="mdi-rss">
@@ -372,7 +369,6 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from "vue"
 import { useViewport } from "../composables/useViewport"
-import ConfigPanel from "./Config.vue"
 
 const props = defineProps({
   api: { type: [Object, Function], required: true },
@@ -381,7 +377,6 @@ const props = defineProps({
 })
 
 const { isMobile } = useViewport(600)
-const config = ref({})
 
 const channels = ref([])
 const summary = reactive({ total: 0, enabled: 0, tg_entries: 0, last_poll: 0 })
@@ -715,35 +710,7 @@ function editFromDetail() {
   if (item) openEdit(item)
 }
 
-async function loadConfig() {
-  try {
-    const raw = await props.api.get(`plugin/${props.pluginId}`)
-    config.value = raw?.data ?? raw ?? {}
-  } catch (error) {
-    config.value = {}
-  }
-}
-
-async function saveConfig(payload) {
-  try {
-    const handler = props.api?.put || props.api?.post
-    if (typeof handler !== "function") {
-      notify("宿主缺少保存接口", "error")
-      return
-    }
-    await handler.call(props.api, `plugin/${props.pluginId}`, payload)
-    config.value = { ...payload }
-    notify("设置已保存")
-  } catch (error) {
-    notify(`保存失败：${error.message}`, "error")
-  }
-}
-
 onMounted(async () => {
-  if (props.navKey === "settings") {
-    await loadConfig()
-    return
-  }
   await load()
   await loadSummary()
 })

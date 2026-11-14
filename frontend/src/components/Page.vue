@@ -23,18 +23,9 @@
       </v-col>
     </v-row>
 
-    <v-row dense class="mb-3">
-      <v-col cols="12" sm="6">
-        <v-btn block color="primary" prepend-icon="mdi-open-in-new" @click="openChannels">
-          打开渠道管理
-        </v-btn>
-      </v-col>
-      <v-col cols="12" sm="6">
-        <v-btn block variant="tonal" prepend-icon="mdi-cog" @click="openSettings">
-          插件设置
-        </v-btn>
-      </v-col>
-    </v-row>
+    <v-btn block color="primary" prepend-icon="mdi-open-in-new" class="mb-3" @click="openChannels">
+      打开渠道管理
+    </v-btn>
 
     <v-card variant="outlined">
       <v-card-title class="text-subtitle-2 py-2">渠道概览</v-card-title>
@@ -110,10 +101,6 @@ function openChannels() {
   window.location.hash = `#/plugin-app/${pluginId}/channels`
 }
 
-function openSettings() {
-  const pluginId = props.pluginId || "QuarkChannel"
-  window.location.hash = `#/plugin-app/${pluginId}/settings`
-}
 
 onMounted(async () => {
   try {
