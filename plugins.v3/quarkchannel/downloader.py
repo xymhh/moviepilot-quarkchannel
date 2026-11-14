@@ -502,6 +502,11 @@ class DownloadManager:
                     self._aria2_gids.pop(task.hash, None)
                 # 夸克 CDN 对 aria2 的请求特征较严（403/412），这类拒绝改用自研分片，
                 # 避免把本可下载的资源判失败。
+                if "status=412" in aria2_error:
+                    try:
+                        client.mark_risk()
+                    except Exception:  # noqa: BLE001 - 统计失败不影响回落
+                        pass
                 if any(code in aria2_error for code in ("status=401", "status=403",
                                                         "status=404", "status=412")):
                     logger.warning(f"aria2 请求被夸克拒绝（{aria2_error}），回落到自研分片下载")
@@ -569,6 +574,11 @@ class DownloadManager:
             )
             if response is None or response.status_code not in (200, 206):
                 status = getattr(response, "status_code", "无响应")
+                if status == 412:
+                    try:
+                        client.mark_risk()
+                    except Exception:  # noqa: BLE001 - 统计失败不影响主流程
+                        pass
                 raise RuntimeError(f"分片下载失败：{start}-{end}，HTTP {status}")
             payload = response.content or b""
             if response.status_code == 200 and start > 0:

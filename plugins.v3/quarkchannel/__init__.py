@@ -85,7 +85,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.10.2"
+    plugin_version = "0.10.3"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -1567,6 +1567,37 @@ class QuarkChannel(_PluginBase):
             from app.sdk.network import RequestUtils as _Req
             probe = _Req().get_res(url, headers={**headers, "Range": "bytes=0-1023"}, timeout=30)
             python_status = getattr(probe, "status_code", None)
+            variants = {}
+            try:
+                import requests as _rq
+                base = {
+                    "UA": {"User-Agent": headers.get("User-Agent", "")},
+                    "UA+Ref": {"User-Agent": headers.get("User-Agent", ""),
+                               "Referer": headers.get("Referer", "")},
+                    "UA+Ref+Cookie": {"User-Agent": headers.get("User-Agent", ""),
+                                      "Referer": headers.get("Referer", ""),
+                                      "Cookie": headers.get("Cookie", "")},
+                    "UA+Ref+Cookie+Range": {"User-Agent": headers.get("User-Agent", ""),
+                                            "Referer": headers.get("Referer", ""),
+                                            "Cookie": headers.get("Cookie", ""),
+                                            "Range": "bytes=0-1023"},
+                    "UA+ShareRef": {"User-Agent": headers.get("User-Agent", ""),
+                                    "Referer": share_url},
+                    "UA+Identity": {"User-Agent": headers.get("User-Agent", ""),
+                                    "Referer": headers.get("Referer", ""),
+                                    "Cookie": headers.get("Cookie", ""),
+                                    "Accept": "*/*",
+                                    "Accept-Encoding": "identity"},
+                }
+                for name, hdrs in base.items():
+                    try:
+                        vr = _rq.get(url, headers=hdrs, timeout=15, stream=True)
+                        variants[name] = vr.status_code
+                        vr.close()
+                    except Exception as verr:  # noqa: BLE001 - 诊断用
+                        variants[name] = type(verr).__name__
+            except Exception:  # noqa: BLE001 - 诊断失败不影响结果
+                variants = {}
             body = getattr(probe, "content", b"") or b""
             try:
                 body_text = body.decode("utf-8", "ignore")[:200]
@@ -1578,6 +1609,8 @@ class QuarkChannel(_PluginBase):
                 "headers": sorted(headers.keys()),
                 "file": {"name": target.name, "size": target.size},
                 "aria2": self._aria2_variants(url, headers),
+                "variants": variants,
+                "url_head": url[:160],
             }
         finally:
             client.delete_files(saved)

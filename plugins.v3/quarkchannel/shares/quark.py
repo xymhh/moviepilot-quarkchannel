@@ -88,6 +88,8 @@ class QuarkShareClient:
         self.keep_saved = bool(keep_saved)
         self._folder_fid: Optional[str] = None
         self._last_pwd_id: str = ""
+        self._risk_failures = 0
+        self._risk_blocked_until = 0.0
         self._request = RequestUtils()
 
     def _headers(self, referer: str = "https://pan.quark.cn/",
@@ -182,6 +184,14 @@ class QuarkShareClient:
                 snippet = ""
             logger.warning(f"夸克接口 {path} 返回空 JSON：status={status} body={snippet}")
         return payload
+
+    def mark_risk(self) -> None:
+        """记录一次 412 风控命中；连续 3 次进入 30 分钟冷却。"""
+        self._risk_failures += 1
+        if self._risk_failures >= 3:
+            self._risk_blocked_until = time.monotonic() + 1800
+            self._risk_failures = 0
+            logger.warning("夸克直链连续 3 次 412，暂停取链 30 分钟")
 
     def _session(self) -> Any:
         """返回独立的 requests 会话，避免复用宿主连接池。
@@ -558,6 +568,9 @@ class QuarkShareClient:
         :param retries: 重试次数
         :return: (下载地址, 需要携带的请求头)
         """
+        if time.monotonic() < self._risk_blocked_until:
+            remain = int(self._risk_blocked_until - time.monotonic())
+            raise ValueError(f"夸克直链被风控限制，冷却中（剩余 {remain} 秒）")
         data: dict = {}
         url = ""
         used_ua = CLIENT_UA
@@ -603,6 +616,13 @@ class QuarkShareClient:
                 children = [str(row.get("fid") or "") for row in self._walk_files(fid) if row.get("fid")]
             except Exception:  # noqa: BLE001 - 展开失败按原错误返回
                 children = []
+            self._risk_failures += 1
+            if self._risk_failures >= 3:
+                self._risk_blocked_until = time.monotonic() + 1800
+                self._risk_failures = 0
+                logger.warning(
+                    "夸克直链连续 3 次拿不到地址（多为 412 风控），暂停取链 30 分钟"
+                )
             if children:
                 logger.info(f"取链 fid 为目录，改用其中 {len(children)} 个文件的第一个")
                 return self.download_url_by_fid(children[0], name=name, retries=1)
