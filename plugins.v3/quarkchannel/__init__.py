@@ -625,7 +625,7 @@ class QuarkChannel(_PluginBase):
             field("expand_max_files", "单次最多展开集数", kind="number", cols=4,
                   hint="0 表示不限制（完整展开）"),
             field("results_per_page", "每页资源条数", kind="number", cols=4,
-                  hint="0 表示不分页，一次返回全部"),
+                  hint="0 = 不分页（推荐）；设成 50 则按 MP 的 page 参数分页"),
             field("keyword_whitelist", "关键词白名单", cols=4,
                   placeholder="多个关键词用英文逗号分隔"),
         ])
@@ -725,7 +725,7 @@ class QuarkChannel(_PluginBase):
             "only_whitelist": False,
             "expand_in_search": True,
             "expand_max_files": 0,
-            "results_per_page": 50,
+            "results_per_page": 0,
             "keyword_whitelist": "",
             "pansou_url": "",
             "pansou_src": "all",
@@ -1173,9 +1173,9 @@ class QuarkChannel(_PluginBase):
     def _results_per_page(self) -> int:
         """每页返回多少条资源；0 表示不分页（全部返回）。"""
         try:
-            return max(0, int(self._config.get("results_per_page", 50)))
+            return max(0, int(self._config.get("results_per_page", 0)))
         except (TypeError, ValueError):
-            return 50
+            return 0
 
     def _search_cache_get(self, key: str) -> Optional[list]:
         """读取搜索结果缓存（10 分钟有效）。"""
