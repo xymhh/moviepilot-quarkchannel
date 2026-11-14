@@ -1,6 +1,5 @@
 <template>
   <div class="qc-page">
-    <template>
     <v-row dense class="mb-2">
       <v-col cols="6" sm="3">
         <v-chip size="small" variant="tonal" color="primary" prepend-icon="mdi-rss">
@@ -362,7 +361,6 @@
     <v-snackbar v-model="snack.show" :timeout="3000" :color="snack.color" location="bottom">
       {{ snack.text }}
     </v-snackbar>
-    </template>
   </div>
 </template>
 
