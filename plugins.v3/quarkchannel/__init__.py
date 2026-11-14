@@ -91,7 +91,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.12.9"
+    plugin_version = "0.13.0"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -1110,7 +1110,10 @@ class QuarkChannel(_PluginBase):
             fid = str(item.get("fid") or "").strip()
             if size <= 0 or not fid:
                 continue
-            episode = self._episode_of(str(item.get("name") or ""))
+            file_name = str(item.get("name") or "")
+            if not file_name.lower().endswith(VIDEO_SUFFIXES):
+                continue
+            episode = self._episode_of(file_name)
             if episode is None:
                 continue
             existing = by_episode.get(episode)
