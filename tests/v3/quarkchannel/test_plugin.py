@@ -379,9 +379,11 @@ def test_search_dedupes_episode_and_keeps_largest_file():
     plugin._tg_index = None
     plugin._pansou = _Pansou([{"url": url, "title": "重复集", "source": "pansou"}])
     rows = plugin.search_torrents(keyword="重复")
-    assert len(rows) == 2
-    assert rows[0].size == 300.0 and "fid=large" in rows[0].enclosure
-    assert rows[1].size == 200.0 and "fid=e2" in rows[1].enclosure
+    # 1 条整包 + 2 条单集（同集号只保留体积最大的文件）
+    assert len(rows) == 3
+    assert "fid=" not in rows[0].enclosure
+    assert rows[1].size == 300.0 and "fid=large" in rows[1].enclosure
+    assert rows[2].size == 200.0 and "fid=e2" in rows[2].enclosure
 
 
 def test_search_falls_back_to_legacy_when_channels_empty(tmp_path: Path):
