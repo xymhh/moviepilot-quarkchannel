@@ -91,7 +91,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.13.0"
+    plugin_version = "0.13.1"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -1142,6 +1142,7 @@ class QuarkChannel(_PluginBase):
         """把候选按集号合并展开：同一集保留体积最大的版本，集数完整不重复。"""
         merged: dict[int, tuple[float, dict, dict]] = {}
         packs: list[TorrentInfo] = []
+        pack_entries_by_candidate: dict[int, Tuple[dict, ShareEntry]] = {}
         for candidate in candidates:
             entry = self._candidate_entry(candidate)
             if not entry:
@@ -1168,12 +1169,20 @@ class QuarkChannel(_PluginBase):
             if not by_episode:
                 packs.append(self._whole_candidate(candidate, entry, mtype))
                 continue
+            # 整包始终保留（可选整包），同时展开出单集（可选单集）
+            pack_entries_by_candidate[id(candidate)] = (candidate, entry)
             for episode, (size, item) in by_episode.items():
                 current = merged.get(episode)
                 if current is None or size > current[0]:
                     merged[episode] = (size, item, candidate)
         results: list[TorrentInfo] = []
         limit = self._expand_limit()
+        # 先按分享输出「整包」，紧跟该分享展开出的单集
+        for candidate, entry in pack_entries_by_candidate.values():
+            results.append(self._whole_candidate(
+                candidate, entry, mtype,
+                pri_order=int(candidate.get("expand_pri") or candidate.get("pri_order") or 0),
+            ))
         for episode, (size, item, candidate) in sorted(merged.items())[:limit or None]:
             file_name = str(item.get("name") or "file")
             share_title = str(candidate.get("title") or "").strip()
@@ -1234,7 +1243,8 @@ class QuarkChannel(_PluginBase):
             return 0
 
     def _whole_candidate(self, candidate: dict, entry: Optional[ShareEntry],
-                         mtype: Optional[MediaType]) -> TorrentInfo:
+                         mtype: Optional[MediaType],
+                         pri_order: Optional[int] = None) -> TorrentInfo:
         """构造整包候选；有快照时使用总大小与文件数。"""
         size = self._size_of(candidate.get("size"))
         title = str(candidate.get("title") or "")
@@ -1244,7 +1254,8 @@ class QuarkChannel(_PluginBase):
             title = title or entry.title
             detail = f"整包 · {len(entry.files)} 个文件 · 可在插件内选集"
         return self._make_torrent(
-            candidate, title, size, int(candidate.get("pri_order") or 0),
+            candidate, title, size,
+            int(pri_order if pri_order is not None else (candidate.get("pri_order") or 0)),
             "", mtype, detail,
         )
 

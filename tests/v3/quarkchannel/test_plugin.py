@@ -265,13 +265,15 @@ def test_search_expands_cached_episodes_with_fid():
         {"url": url, "title": "演示剧集", "size": 606, "source": "pansou"},
     ])
     rows = plugin.search_torrents(keyword="演示")
+    # 整包在前，后面是展开出的单集
     assert [item.title for item in rows] == [
-        "演示 S01E01", "演示 S01E02", "演示 S01E03",
+        "演示剧集", "演示 S01E01", "演示 S01E02", "演示 S01E03",
     ]
-    assert [item.size for item in rows] == [101.0, 202.0, 303.0]
-    assert [item.pri_order for item in rows] == [5, 5, 5]
-    assert ["fid=f1" in rows[0].enclosure, "fid=f2" in rows[1].enclosure,
-            "fid=f3" in rows[2].enclosure] == [True, True, True]
+    assert [item.size for item in rows] == [606.0, 101.0, 202.0, 303.0]
+    assert [item.pri_order for item in rows] == [5, 5, 5, 5]
+    assert "fid=" not in rows[0].enclosure
+    assert ["fid=f1" in rows[1].enclosure, "fid=f2" in rows[2].enclosure,
+            "fid=f3" in rows[3].enclosure] == [True, True, True]
 
 
 def test_search_collapses_each_share_when_expand_disabled():
