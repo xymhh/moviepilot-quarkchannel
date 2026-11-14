@@ -266,7 +266,7 @@ def test_search_expands_cached_episodes_with_fid():
     ])
     rows = plugin.search_torrents(keyword="演示")
     assert [item.title for item in rows] == [
-        "演示剧集 S01E01", "演示剧集 S01E02", "演示剧集 S01E03",
+        "演示 S01E01", "演示 S01E02", "演示 S01E03",
     ]
     assert [item.size for item in rows] == [101.0, 202.0, 303.0]
     assert [item.pri_order for item in rows] == [5, 5, 5]
