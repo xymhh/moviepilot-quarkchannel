@@ -15,6 +15,7 @@ export default defineConfig({
       name: "quarkchannel",
       filename: "remoteEntry.js",
       exposes: {
+        "./Page": "./src/components/Page.vue",
         "./Config": "./src/components/Config.vue",
         "./AppPage": "./src/components/AppPage.vue",
       },
