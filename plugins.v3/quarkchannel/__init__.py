@@ -75,6 +75,10 @@ EPISODE_PATTERNS = (
 STORAGE_PREFIX = ("u115:", "alipan:", "rclone:", "alist:", "alistgo:", "smb:")
 SEASON_EPISODE_RE = re.compile(r"[Ss](\d{1,2})[._ ]?[Ee](\d{1,4})")
 MAX_EXPAND_FILES = 0  # 0 表示不限制，按集完整展开
+VIDEO_SUFFIXES = (
+    ".mkv", ".mp4", ".avi", ".ts", ".m2ts", ".mov", ".wmv", ".flv",
+    ".rmvb", ".webm", ".mpg", ".mpeg", ".iso", ".m4v",
+)
 PENDING_SHARE_LIMIT = 500
 PREWARM_COUNT = 2
 PREWARM_DELAY_SECONDS = 0.2
@@ -87,7 +91,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.12.8"
+    plugin_version = "0.12.9"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -1148,7 +1152,11 @@ class QuarkChannel(_PluginBase):
                 fid = str(item.get("fid") or "").strip()
                 if size <= 0 or not fid:
                     continue
-                episode = self._episode_of(str(item.get("name") or ""))
+                file_name = str(item.get("name") or "")
+                if not file_name.lower().endswith(VIDEO_SUFFIXES):
+                    # 压缩包/字幕/图片等非视频文件不参与按集展开
+                    continue
+                episode = self._episode_of(file_name)
                 if episode is None:
                     continue
                 existing = by_episode.get(episode)
@@ -2314,7 +2322,11 @@ class QuarkChannel(_PluginBase):
         wanted = {int(item) for item in episodes if str(item).isdigit()}
         if not wanted:
             return files
-        matched = [item for item in files if QuarkChannel._episode_of(str(item.get("name") or "")) in wanted]
+        matched = [
+            item for item in files
+            if str(item.get("name") or "").lower().endswith(VIDEO_SUFFIXES)
+            and QuarkChannel._episode_of(str(item.get("name") or "")) in wanted
+        ]
         return matched
 
     @staticmethod
