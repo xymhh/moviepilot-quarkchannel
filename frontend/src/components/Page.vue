@@ -1,5 +1,13 @@
 <template>
   <div class="qc-detail">
+    <button
+      class="qc-close"
+      type="button"
+      aria-label="关闭"
+      data-native-dialog-close
+      @click="emit('close')">
+      <v-icon icon="mdi-close" size="20" />
+    </button>
     <div class="qc-head">
       <img v-if="iconUrl" class="qc-icon" :src="iconUrl" alt="" />
       <div class="qc-head-text">
@@ -168,6 +176,31 @@ onMounted(async () => {
 <style scoped>
 .qc-detail {
   padding: 14px 16px 28px;
+}
+
+.qc-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(var(--v-theme-on-surface), 0.7);
+  background: transparent;
+  cursor: pointer;
+  z-index: 2;
+}
+
+.qc-close:hover {
+  background: rgba(var(--v-theme-on-surface), 0.08);
+}
+
+.qc-detail {
+  position: relative;
 }
 
 .qc-head {

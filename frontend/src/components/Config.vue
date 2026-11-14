@@ -1,5 +1,13 @@
 <template>
   <div class="config-page">
+    <button
+      class="qc-close"
+      type="button"
+      aria-label="关闭"
+      data-native-dialog-close
+      @click="emit('close')">
+      <v-icon icon="mdi-close" size="20" />
+    </button>
     <div class="config-head">
       <div>
         <div class="title-row">
@@ -271,7 +279,7 @@ const props = defineProps({
   pluginId: { type: String, default: "QuarkChannel" },
 })
 
-const emit = defineEmits(["save"])
+const emit = defineEmits(["save", "close"])
 const { isMobile } = useViewport(600)
 const tab = ref("basic")
 
@@ -338,7 +346,29 @@ watch(
 </script>
 
 <style scoped>
+.qc-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(var(--v-theme-on-surface), 0.7);
+  background: transparent;
+  cursor: pointer;
+  z-index: 2;
+}
+
+.qc-close:hover {
+  background: rgba(var(--v-theme-on-surface), 0.08);
+}
+
 .config-page {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 12px;
