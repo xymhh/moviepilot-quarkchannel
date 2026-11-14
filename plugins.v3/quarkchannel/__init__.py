@@ -69,6 +69,8 @@ EPISODE_PATTERNS = (
     re.compile(r"(?:第|EP|Ep|ep)\s*(\d{1,4})\s*[-~]\s*\d{1,4}"),
     re.compile(r"[\[\(【]\s*(\d{1,4})\s*[\]\)】]"),
     re.compile(r"(?<![\dA-Za-z])(\d{1,4})\s*[-~]\s*\d{1,4}(?![\dA-Za-z])"),
+    # 纯数字文件名：01.mp4 / 12.mkv（排除 1080p 这类分辨率）
+    re.compile(r"^\s*(\d{1,4})\s*(?:\.|$|[-_. ])"),
 )
 STORAGE_PREFIX = ("u115:", "alipan:", "rclone:", "alist:", "alistgo:", "smb:")
 SEASON_EPISODE_RE = re.compile(r"[Ss](\d{1,2})[._ ]?[Ee](\d{1,4})")
@@ -85,7 +87,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.11.3"
+    plugin_version = "0.11.4"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -795,9 +797,9 @@ class QuarkChannel(_PluginBase):
         missing_inline = [
             item for item in candidates
             if item.get("url") and not self._cached_entry(item.get("sid", ""))
-        ][:4]
+        ][:6]
         if missing_inline:
-            from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FTimeout
+            from concurrent.futures import ThreadPoolExecutor
 
             pool = ThreadPoolExecutor(max_workers=len(missing_inline))
             futures = [
@@ -809,9 +811,8 @@ class QuarkChannel(_PluginBase):
             ]
             for future in futures:
                 try:
-                    future.result(timeout=6)
-                except _FTimeout:
-                    logger.warning("分享快照超时，本次按整包返回")
+                    # 不设超时：宁可搜索慢 1-2 秒，也要把整包拆成单集
+                    future.result()
                 except Exception as error:  # noqa: BLE001 - 单条失败不影响其它候选
                     logger.debug(f"分享快照失败：{type(error).__name__}")
             pool.shutdown(wait=False)
@@ -920,6 +921,10 @@ class QuarkChannel(_PluginBase):
         if sid in seen:
             return
         seen.add(sid)
+        lowered = str(item.get("title") or "").lower()
+        if re.search(r"\.(?:epub|txt|pdf|mobi|azw3|docx?|zip|rar|7z)\b", lowered):
+            # 电子书/压缩包不是视频资源，直接跳过
+            return
         label = str(item.get("channel") or site_name) if is_tg else site_name
         candidate = self._make_candidate(
             sid, normalized, str(item.get("passcode") or ""),
@@ -1064,7 +1069,7 @@ class QuarkChannel(_PluginBase):
         """构造整包候选；未命中缓存时大小填 0。"""
         size = self._size_of(candidate.get("size"))
         title = str(candidate.get("title") or "")
-        detail = "整包 · 待展开"
+        detail = "整包（未取到文件清单，点下载会下全部）"
         if entry:
             size = size or int(entry.total_size or 0)
             title = title or entry.title
