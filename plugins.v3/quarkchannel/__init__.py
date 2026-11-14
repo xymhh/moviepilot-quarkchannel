@@ -87,7 +87,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.12.3"
+    plugin_version = "0.12.4"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -111,6 +111,7 @@ class QuarkChannel(_PluginBase):
         """初始化进程内候选登记表与后台预热队列。"""
         super().__init__()
         self._pending_shares: OrderedDict[str, dict] = OrderedDict()
+        self._search_cache: dict[str, tuple[float, list]] = {}
         self._pending_lock = threading.RLock()
         self._prewarm_pool: Optional[ThreadPoolExecutor] = None
         self._prewarm_lock = threading.Lock()
@@ -623,6 +624,8 @@ class QuarkChannel(_PluginBase):
                   hint="开启后每个集数单独一条，可直接点某一集下载"),
             field("expand_max_files", "单次最多展开集数", kind="number", cols=4,
                   hint="0 表示不限制（完整展开）"),
+            field("results_per_page", "每页资源条数", kind="number", cols=4,
+                  hint="0 表示不分页，一次返回全部"),
             field("keyword_whitelist", "关键词白名单", cols=4,
                   placeholder="多个关键词用英文逗号分隔"),
         ])
@@ -722,6 +725,7 @@ class QuarkChannel(_PluginBase):
             "only_whitelist": False,
             "expand_in_search": True,
             "expand_max_files": 0,
+            "results_per_page": 50,
             "keyword_whitelist": "",
             "pansou_url": "",
             "pansou_src": "all",
@@ -808,8 +812,12 @@ class QuarkChannel(_PluginBase):
                         page: int = 0) -> list[TorrentInfo]:
         """优先查 Telegram 索引，再合并 pansou；搜索阶段不再同步取快照。"""
         started = time.time()
-        if not self._enabled or not keyword or page:
+        if not self._enabled or not keyword:
             return []
+        try:
+            page = max(0, int(page or 0))
+        except (TypeError, ValueError):
+            page = 0
         if not self._keyword_allowed(keyword):
             logger.debug(f"直链频道跳过关键词：{keyword}")
             return []
@@ -843,24 +851,36 @@ class QuarkChannel(_PluginBase):
                 except Exception as error:  # noqa: BLE001 - 单条失败不影响其它候选
                     logger.debug(f"分享快照失败：{type(error).__name__}")
             pool.shutdown(wait=False)
-        results: list[TorrentInfo] = []
-        if bool(self._config.get("expand_in_search", True)):
-            results.extend(self._expanded_results(candidates, mtype))
+        cache_key = f"{keyword}|{getattr(mtype, 'value', mtype)}"
+        cached = self._search_cache_get(cache_key)
+        if cached is not None:
+            results = cached
         else:
-            results.extend(self._results_for_candidate(candidate, mtype)
-                           for candidate in candidates)
-            results = [item for group in results for item in group]
+            results = []
+            if bool(self._config.get("expand_in_search", True)):
+                results.extend(self._expanded_results(candidates, mtype))
+            else:
+                for candidate in candidates:
+                    results.extend(self._results_for_candidate(candidate, mtype))
+            self._search_cache_put(cache_key, results)
+        per_page = self._results_per_page()
+        start = page * per_page if per_page else 0
+        if per_page:
+            paged = results[start:start + per_page]
+        else:
+            paged = results[start:]
+        logger.info(
+            f"直链频道为「{keyword}」返回 {len(paged)} 条资源（第 {page + 1} 页，"
+            f"共 {len(results)} 条，缓存命中={cached is not None}），"
+            f"耗时 {time.time() - started:.2f}s"
+        )
+        return paged
         # 可分集的单集条目排在整包前面，方便直接选集
         # 稳定排序：单集条目在前，整包在后，保持集号顺序不变
         results.sort(key=lambda item: 0 if "fid=" in (item.enclosure or "") else 1)
         missing = [item for item in candidates if not self._cached_entry(item["sid"])]
         self._submit_prewarm(missing[:PREWARM_COUNT])
-        logger.info(
-            f"直链频道为「{keyword}」返回 {len(results)} 条资源，"
-            f"候选 {len(candidates)} 个（缓存预热 {min(len(missing), PREWARM_COUNT)} 个），"
-            f"耗时 {time.time() - started:.2f}s"
-        )
-        return results
+        return paged
 
     def _channel_pansou(self, channel: dict) -> PansouSource:
         """按渠道配置复用 pansou 实例，保留进程内缓存。"""
@@ -1149,6 +1169,32 @@ class QuarkChannel(_PluginBase):
             ))
         results.extend(packs)
         return results
+
+    def _results_per_page(self) -> int:
+        """每页返回多少条资源；0 表示不分页（全部返回）。"""
+        try:
+            return max(0, int(self._config.get("results_per_page", 50)))
+        except (TypeError, ValueError):
+            return 50
+
+    def _search_cache_get(self, key: str) -> Optional[list]:
+        """读取搜索结果缓存（10 分钟有效）。"""
+        with self._pending_lock:
+            item = self._search_cache.get(key)
+            if not item:
+                return None
+            stamp, rows = item
+            if time.time() - stamp > 600:
+                self._search_cache.pop(key, None)
+                return None
+            return rows
+
+    def _search_cache_put(self, key: str, rows: list) -> None:
+        """写入搜索结果缓存，最多保留 20 个关键词。"""
+        with self._pending_lock:
+            self._search_cache[key] = (time.time(), rows)
+            while len(self._search_cache) > 20:
+                self._search_cache.pop(next(iter(self._search_cache)))
 
     def _expand_limit(self) -> int:
         """单次搜索最多展开多少集；0 表示不限制（默认完整展开）。"""
