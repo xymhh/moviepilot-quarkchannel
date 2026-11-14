@@ -18,7 +18,7 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Optional, Tuple, Union
 from urllib.parse import quote
 
 from fastapi.responses import Response
@@ -78,6 +78,15 @@ MAX_EXPAND_FILES = 0  # 0 表示不限制，按集完整展开
 VIDEO_SUFFIXES = (
     ".mkv", ".mp4", ".avi", ".ts", ".m2ts", ".mov", ".wmv", ".flv",
     ".rmvb", ".webm", ".mpg", ".mpeg", ".iso", ".m4v",
+)
+EXPAND_IN_SEARCH_DEFAULT = True
+MAX_RESULTS_DEFAULT = 5
+MAX_RANGE_EPISODES = 10  # 单个文件最多覆盖的集数，防误解析
+QUALITY_RE = re.compile(r"(2160[pP]|4[Kk]|1080[pP]|720[pP]|480[pP])")
+EPISODE_RANGE_PATTERNS = (
+    re.compile(r"[Ss]\d{1,2}[._ ]?[Ee](\d{1,4})\s*[-~]\s*(?:[Ss]\d{1,2}[._ ]?)?[Ee]?(\d{1,4})"),
+    re.compile(r"(?:第|EP|Ep|ep)\s*(\d{1,4})\s*[-~]\s*(?:第\s*)?(?:EP|Ep|ep)?\s*(\d{1,4})\s*[集话話]?"),
+    re.compile(r"(?<![\dA-Za-z])(\d{1,4})\s*[-~]\s*(\d{1,4})(?![\dA-Za-z])"),
 )
 PENDING_SHARE_LIMIT = 500
 PREWARM_COUNT = 2
@@ -727,7 +736,7 @@ class QuarkChannel(_PluginBase):
             "download_root": "/downloads",
             "max_tasks": 3,
             "only_whitelist": False,
-            "expand_in_search": True,
+            "expand_in_search": EXPAND_IN_SEARCH_DEFAULT,
             "expand_max_files": 0,
             "results_per_page": 0,
             "keyword_whitelist": "",
@@ -825,7 +834,7 @@ class QuarkChannel(_PluginBase):
         if not self._keyword_allowed(keyword):
             logger.debug(f"直链频道跳过关键词：{keyword}")
             return []
-        limit = max(1, min(int(self._config.get("max_results") or 3), 10))
+        limit = max(1, min(int(self._config.get("max_results") or MAX_RESULTS_DEFAULT), 10))
         channels = self._channels.list() if self._channels else []
         if channels:
             candidates = self._collect_channel_candidates(channels, keyword, limit)
@@ -860,30 +869,27 @@ class QuarkChannel(_PluginBase):
         if cached is not None:
             results = cached
         else:
-            results = []
-            if bool(self._config.get("expand_in_search", True)):
-                results.extend(self._expanded_results(candidates, mtype, base_title=keyword))
-            else:
-                for candidate in candidates:
-                    results.extend(self._results_for_candidate(candidate, mtype))
-            self._search_cache_put(cache_key, results)
+            results = self._expanded_results(
+                candidates, mtype, base_title=keyword,
+                expand=bool(self._config.get("expand_in_search", EXPAND_IN_SEARCH_DEFAULT)),
+            )
+            # 只有全部候选都有快照时才写缓存；否则"只有整包"的结果会被冻 10 分钟
+            if all(self._cached_entry(str(item.get("sid") or "")) is not None for item in candidates):
+                self._search_cache_put(cache_key, results)
         per_page = self._results_per_page()
         start = page * per_page if per_page else 0
         if per_page:
             paged = results[start:start + per_page]
         else:
             paged = results[start:]
+        # 未拿到快照的候选交给后台预热，下一次搜索才能展开单集
+        missing = [item for item in candidates if not self._cached_entry(item.get("sid", ""))]
+        self._submit_prewarm(missing[:PREWARM_COUNT])
         logger.info(
             f"直链频道为「{keyword}」返回 {len(paged)} 条资源（第 {page + 1} 页，"
             f"共 {len(results)} 条，缓存命中={cached is not None}），"
             f"耗时 {time.time() - started:.2f}s"
         )
-        return paged
-        # 可分集的单集条目排在整包前面，方便直接选集
-        # 稳定排序：单集条目在前，整包在后，保持集号顺序不变
-        results.sort(key=lambda item: 0 if "fid=" in (item.enclosure or "") else 1)
-        missing = [item for item in candidates if not self._cached_entry(item["sid"])]
-        self._submit_prewarm(missing[:PREWARM_COUNT])
         return paged
 
     def _channel_pansou(self, channel: dict) -> PansouSource:
@@ -1074,18 +1080,6 @@ class QuarkChannel(_PluginBase):
             logger.warning(f"读取分享缓存失败：{type(error).__name__}")
             return None
 
-    def _results_for_candidate(self, candidate: dict,
-                               mtype: Optional[MediaType]) -> list[TorrentInfo]:
-        """按配置返回一条整包候选，或保留旧的按集展开行为。"""
-        entry = self._candidate_entry(candidate)
-        if not bool(self._config.get("expand_in_search", False)):
-            return [self._whole_candidate(candidate, entry, mtype)]
-        if entry:
-            expanded = self._expand_candidate(candidate, entry, mtype)
-            if expanded:
-                return expanded
-        return [self._whole_candidate(candidate, entry, mtype)]
-
     def _candidate_entry(self, candidate: dict) -> Optional[ShareEntry]:
         """读取候选对应快照，并兼容渠道原始 sid 的二次查表。"""
         entry = self._cached_entry(str(candidate.get("sid") or ""))
@@ -1099,53 +1093,18 @@ class QuarkChannel(_PluginBase):
                 return entry
         return None
 
-    def _expand_candidate(self, candidate: dict, entry: ShareEntry,
-                          mtype: Optional[MediaType]) -> list[TorrentInfo]:
-        """按集号展开快照；无集号或同集重复时按规则收敛。"""
-        by_episode: dict[int, tuple[int, dict]] = {}
-        for item in entry.files:
-            if not isinstance(item, dict) or item.get("dir"):
-                continue
-            size = self._size_of(item.get("size"))
-            fid = str(item.get("fid") or "").strip()
-            if size <= 0 or not fid:
-                continue
-            file_name = str(item.get("name") or "")
-            if not file_name.lower().endswith(VIDEO_SUFFIXES):
-                continue
-            episode = self._episode_of(file_name)
-            if episode is None:
-                continue
-            existing = by_episode.get(episode)
-            if existing is None or size > existing[0]:
-                by_episode[episode] = (size, item)
-        if not by_episode:
-            return []
-        share_title = self._clean_title(
-            str(candidate.get("title") or entry.title or entry.folder_name)
-        )
-        results: list[TorrentInfo] = []
-        limit = self._expand_limit()
-        for episode, (size, item) in sorted(by_episode.items())[:limit or None]:
-            file_name = str(item.get("name") or "file")
-            title = f"{share_title} {self._episode_label(file_name, episode)}".strip()
-            results.append(self._make_torrent(
-                candidate, title, size, int(candidate.get("expand_pri") or 5),
-                str(item.get("fid") or ""), mtype,
-                f"第{episode}集 · {file_name}",
-            ))
-        return results
-
     def _expanded_results(self, candidates: list[dict],
-                           mtype: Optional[MediaType],
-                           base_title: str = "") -> list[TorrentInfo]:
+                          mtype: Optional[MediaType],
+                          base_title: str = "",
+                          expand: bool = True) -> list[TorrentInfo]:
         """按分享分组输出：先整包，紧跟该分享胜出的单集。
 
         - 整包与它下面的单集一定来自同一个分享，避免"整包已过期、单集却能下"的错觉；
-        - 同一集号在多个分享里出现时，只保留体积最大的版本，并归到那个分享的分组里。
+        - 同一集号在多个分享里出现时，按（集号，画质）去重，每集每画质只保留体积最大的版本；
+        - expand 为 False 时只输出整包，不再分叉成另一套实现。
         """
-        per_candidate: list[Tuple[dict, Optional[ShareEntry], dict[int, tuple[int, dict]]]] = []
-        best: dict[int, tuple[int, dict, dict]] = {}
+        per_candidate: list[Tuple[dict, Optional[ShareEntry], dict[tuple[int, str], tuple[int, dict]]]] = []
+        best: dict[tuple[int, str], tuple[int, dict, dict]] = {}
         for candidate in candidates:
             entry = self._candidate_entry(candidate)
             if not entry:
@@ -1153,7 +1112,7 @@ class QuarkChannel(_PluginBase):
                 # 下载时会现场再取一次；不展开单集，避免整包与单集错配。
                 per_candidate.append((candidate, None, {}))
                 continue
-            by_episode: dict[int, tuple[int, dict]] = {}
+            by_quality: dict[tuple[int, str], tuple[int, dict]] = {}
             for item in entry.files:
                 if not isinstance(item, dict) or item.get("dir"):
                     continue
@@ -1164,45 +1123,48 @@ class QuarkChannel(_PluginBase):
                 file_name = str(item.get("name") or "")
                 if not file_name.lower().endswith(VIDEO_SUFFIXES):
                     continue
-                episode = self._episode_of(file_name)
-                if episode is None:
-                    continue
-                existing = by_episode.get(episode)
-                if existing is None or size > existing[0]:
-                    by_episode[episode] = (size, item)
-            per_candidate.append((candidate, entry, by_episode))
-            for episode, (size, item) in by_episode.items():
-                current = best.get(episode)
+                for episode in self._episode_range(file_name):
+                    key = (episode, self._quality_of(file_name))
+                    existing = by_quality.get(key)
+                    if existing is None or size > existing[0]:
+                        by_quality[key] = (size, item)
+            per_candidate.append((candidate, entry, by_quality))
+            for key, (size, item) in by_quality.items():
+                current = best.get(key)
                 if current is None or size > current[0]:
-                    best[episode] = (size, item, candidate)
+                    best[key] = (size, item, candidate)
 
         limit = self._expand_limit()
         results: list[TorrentInfo] = []
         shown = 0
-        for candidate, entry, by_episode in per_candidate:
+        for candidate, entry, by_quality in per_candidate:
             # 有单集可展开时整包与单集同优先级；纯整包沿用渠道优先级
             pack_pri = (
                 int(candidate.get("expand_pri") or candidate.get("pri_order") or 0)
-                if by_episode
+                if by_quality
                 else int(candidate.get("pri_order") or 0)
             )
             results.append(self._whole_candidate(
                 candidate, entry, mtype, pri_order=pack_pri,
             ))
+            if not expand:
+                continue
             if limit and shown >= limit:
                 continue
-            for episode in sorted(by_episode):
+            for (episode, quality) in sorted(by_quality):
                 if limit and shown >= limit:
                     break
-                owner = best.get(episode)
+                owner = best.get((episode, quality))
                 if owner is None or owner[2] is not candidate:
-                    # 该集在别的分享里有更大的版本，交给那个分享输出
+                    # 该集该画质在别的分享里有更大的版本，交给那个分享输出
                     continue
-                size, item = by_episode[episode]
+                size, item = by_quality[(episode, quality)]
                 file_name = str(item.get("name") or "file")
                 share_title = str(candidate.get("title") or "").strip()
                 display = (str(base_title).strip() or self._clean_title(share_title))[:80]
                 title = f"{display} {self._episode_label(file_name, episode)}".strip()
+                if quality != "未知":
+                    title = f"{title} {quality}"
                 results.append(self._make_torrent(
                     candidate, title, size, int(candidate.get("expand_pri") or 5),
                     str(item.get("fid") or ""), mtype, f"第{episode}集 · {file_name}",
@@ -1246,19 +1208,32 @@ class QuarkChannel(_PluginBase):
     def _whole_candidate(self, candidate: dict, entry: Optional[ShareEntry],
                          mtype: Optional[MediaType],
                          pri_order: Optional[int] = None) -> TorrentInfo:
-        """构造整包候选；有快照时使用总大小与文件数。"""
+        """构造整包候选；有快照时使用视频文件总大小与规范化标题。"""
         size = self._size_of(candidate.get("size"))
-        title = str(candidate.get("title") or "")
+        raw_title = str(candidate.get("title") or "")
+        title = self._clean_title(raw_title) or raw_title
         detail = "整包（未取到文件清单，点下载会下全部）"
         if entry:
-            size = int(entry.total_size or size)
-            title = title or entry.title
+            size = int(self._video_total_size(entry) or entry.total_size or size)
+            title = self._pack_title(candidate, entry, mtype)
             detail = f"整包 · {len(entry.files)} 个文件 · 可在插件内选集"
         return self._make_torrent(
             candidate, title, size,
             int(pri_order if pri_order is not None else (candidate.get("pri_order") or 0)),
             "", mtype, detail,
         )
+
+    @staticmethod
+    def _video_total_size(entry: ShareEntry) -> int:
+        """快照内视频文件的总大小（不含字幕等非视频文件）。"""
+        total = 0
+        for item in entry.files or []:
+            if not isinstance(item, dict) or item.get("dir"):
+                continue
+            if not str(item.get("name") or "").lower().endswith(VIDEO_SUFFIXES):
+                continue
+            total += QuarkChannel._size_of(item.get("size"))
+        return total
 
     def _make_torrent(self, candidate: dict, title: str, size: int, pri_order: int,
                       fid: str, mtype: Optional[MediaType], detail: str) -> TorrentInfo:
@@ -1283,6 +1258,191 @@ class QuarkChannel(_PluginBase):
         match = SEASON_EPISODE_RE.search(name or "")
         season = int(match.group(1)) if match else 1
         return f"S{season:02d}E{int(episode):02d}"
+
+    @staticmethod
+    def _clean_title(title: str) -> str:
+        """去掉分享标题里的水印、广告词与会误导识别的片段。
+
+        去掉：【】/[] 里的广告段（公众号、微信、资源、更新、高清等）、
+        「更新至第 N 集」「第 N 集」「EP12」、SxxExx 及其区间写法、
+        「全集/完结」等状态词。保留剧名、年份、分辨率等识别信息。
+        """
+        text = str(title or "")
+        # 括号里的广告段：【公众号xxx】、[更新至12集]、(夸克分享)
+        text = re.sub(
+            r"[【\[][^】\]]*(?:公众号|微信|资源|分享|夸克|更新|高清|中字|独家|首发|搬运|转载|关注|群|频道|网盘)[^】\]]*[】\]]",
+            " ", text,
+        )
+        text = re.sub(
+            r"\(\s*(?:公众号|微信|资源|分享|夸克|更新|高清|中字|独家|首发)[^)]*\)",
+            " ", text,
+        )
+        # 更新至第 N 集 / 更新 N 集
+        text = re.sub(r"更新至?\s*(?:第\s*)?\d{1,4}\s*集", " ", text)
+        text = re.sub(r"更新\s*\d{1,4}", " ", text)
+        # 第 X-Y 集区间与单集：第12集、第1-2集
+        text = re.sub(r"第\s*\d{1,4}\s*[-~]\s*\d{1,4}\s*集", " ", text)
+        text = re.sub(r"第\s*\d{1,4}\s*集", " ", text)
+        # EP12 这类单集标记
+        text = re.sub(r"(?:EP|Ep|ep)\s*\d{1,4}(?!\d)", " ", text)
+        # SxxExx 及区间：S01E01、S01E01-E12、S01E01-12
+        text = re.sub(
+            r"[Ss]\d{1,2}[._ ]?[Ee]\d{1,4}(?:\s*[-~]\s*(?:[Ss]\d{1,2}[._ ]?)?[Ee]?\d{1,4})?",
+            " ", text,
+        )
+        # 公众号/微信号后跟的账号名
+        text = re.sub(r"(?:公众号|微信号|VX|vx)\s*[:：]?\s*\S+", " ", text)
+        # 裸露的画质/字幕广告词：高清中字、高清、中字、蓝光、超清
+        text = re.sub(r"(?:高清中字|高清|中字|蓝光|超清)", " ", text)
+        # 全集/完结/连载中等状态词（集数范围已表达该信息）
+        text = re.sub(r"(?:全集|完结|连载中|更新中|已完结)", " ", text)
+        # 残留的成对空括号（内容保留，如【2024】里的年份）
+        text = re.sub(r"[【】\[\]()（）]", " ", text)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip(" -_·•| ")
+
+    @staticmethod
+    def _episode_range(name: str) -> list[int]:
+        """从文件名解析覆盖的集号。
+
+        支持 S01E01-E02、第1-2集、01-02 等区间写法；单集返回 [集号]；
+        区间超过 MAX_RANGE_EPISODES 集时只取前 10 集，防误解析。
+        """
+        text = str(name or "")
+        for pattern in EPISODE_RANGE_PATTERNS:
+            match = pattern.search(text)
+            if not match:
+                continue
+            try:
+                start = int(match.group(1))
+                end = int(match.group(2))
+            except (TypeError, ValueError):
+                continue
+            if end < start:
+                continue
+            if end - start + 1 > MAX_RANGE_EPISODES:
+                end = start + MAX_RANGE_EPISODES - 1
+            return list(range(start, end + 1))
+        for pattern in EPISODE_PATTERNS:
+            match = pattern.search(text)
+            if match:
+                try:
+                    return [int(match.group(match.lastindex or 1))]
+                except (TypeError, ValueError):
+                    continue
+        return []
+
+    @staticmethod
+    def _quality_of(name: str) -> str:
+        """从文件名解析画质档位；未知归为"未知"。"""
+        match = QUALITY_RE.search(str(name or ""))
+        if not match:
+            return "未知"
+        token = match.group(1).lower()
+        if token in ("2160p", "4k"):
+            return "4K"
+        if token == "1080p":
+            return "1080p"
+        if token == "720p":
+            return "720p"
+        return "480p"
+
+    @staticmethod
+    def _season_of_files(files: list) -> Optional[int]:
+        """取文件里出现最多的季号；没有任何季号标记时返回 None。"""
+        counts: dict[int, int] = {}
+        for item in files or []:
+            if not isinstance(item, dict):
+                continue
+            match = SEASON_EPISODE_RE.search(str(item.get("name") or ""))
+            if not match:
+                continue
+            try:
+                season = int(match.group(1))
+            except (TypeError, ValueError):
+                continue
+            counts[season] = counts.get(season, 0) + 1
+        if not counts:
+            return None
+        return max(sorted(counts), key=lambda s: counts[s])
+
+    @staticmethod
+    def _is_movie(mtype: Optional[MediaType]) -> bool:
+        """判断媒体类型是否为电影；兼容宿主枚举与测试桩的字符串形式。"""
+        if mtype is None:
+            return False
+        if getattr(mtype, "name", "") == "MOVIE":
+            return True
+        if getattr(mtype, "value", "") in ("电影", "movie"):
+            return True
+        return str(mtype) in ("电影", "MOVIE")
+
+    @staticmethod
+    def _format_episode_list(episodes: list[int]) -> str:
+        """把集号压缩成 E01-E03,E05 形式；过长时返回空串由调用方退回 S01。"""
+        if not episodes:
+            return ""
+        runs: list[tuple[int, int]] = []
+        start = prev = episodes[0]
+        for episode in episodes[1:]:
+            if episode == prev + 1:
+                prev = episode
+                continue
+            runs.append((start, prev))
+            start = prev = episode
+        runs.append((start, prev))
+        parts = [
+            f"E{a:02d}-E{b:02d}" if a != b else f"E{a:02d}"
+            for a, b in runs
+        ]
+        text = ",".join(parts)
+        return text if len(text) <= 40 else ""
+
+    @staticmethod
+    def _pack_title(candidate: dict, entry: Optional[ShareEntry],
+                    mtype: Optional[MediaType] = None) -> str:
+        """生成规范化整包标题：干净剧名 + 季号 + 集数范围。
+
+        电影直接返回干净剧名；无法解析集号时，有季号标记则退回「剧名 Sxx」，
+        否则只给干净剧名（多半是电影/单文件分享，避免误标成电视剧）；
+        集号不连续且压缩后过长时同样退回 Sxx。
+        标题里不留"更新至第X集"这类会让 MoviePilot 解析成单集的写法。
+        """
+        raw = str(candidate.get("title") or "")
+        if entry:
+            raw = raw or str(entry.title or entry.folder_name or "")
+        name = QuarkChannel._clean_title(raw)
+        if not name or name.startswith(("http://", "https://")):
+            fallback = QuarkChannel._clean_title(entry.folder_name if entry else "")
+            name = fallback or "分享"
+        if QuarkChannel._is_movie(mtype):
+            return name
+        season_found = QuarkChannel._season_of_files(entry.files) if entry else None
+        season = season_found or 1
+        episodes: list[int] = []
+        if entry:
+            seen: set[int] = set()
+            for item in entry.files or []:
+                if not isinstance(item, dict) or item.get("dir"):
+                    continue
+                if not str(item.get("name") or "").lower().endswith(VIDEO_SUFFIXES):
+                    continue
+                seen.update(QuarkChannel._episode_range(str(item.get("name") or "")))
+            episodes = sorted(seen)
+        if not episodes:
+            # 解析不出集号：有季号标记时补 Sxx；否则多半是电影/单文件分享，
+            # 只给干净剧名，避免把电影误标成电视剧。
+            if season_found is not None:
+                return f"{name} S{season:02d}"
+            return name
+        if len(episodes) == 1:
+            return f"{name} S{season:02d}E{episodes[0]:02d}"
+        if len(episodes) == episodes[-1] - episodes[0] + 1:
+            return f"{name} S{season:02d}E{episodes[0]:02d}-E{episodes[-1]:02d}"
+        compressed = QuarkChannel._format_episode_list(episodes)
+        if compressed:
+            return f"{name} S{season:02d}{compressed}"
+        return f"{name} S{season:02d}"
 
     def _submit_prewarm(self, candidates: list[dict]) -> None:
         """把最多两个候选提交给单线程后台队列预热快照。"""
@@ -1967,7 +2127,7 @@ class QuarkChannel(_PluginBase):
                 "auto_pick_enabled": bool(picker.enabled) if picker else False,
                 "auto_pick_dry_run": bool(picker.dry_run) if picker else True,
                 "auto_pick_picks": auto_pick_picks,
-                "expand_in_search": bool(self._config.get("expand_in_search", True)),
+                "expand_in_search": bool(self._config.get("expand_in_search", EXPAND_IN_SEARCH_DEFAULT)),
                 "channels": len(channel_items),
                 "channel_stats": channel_stats,
                 "channel_last_scan": {
@@ -2340,25 +2500,15 @@ class QuarkChannel(_PluginBase):
         matched = [
             item for item in files
             if str(item.get("name") or "").lower().endswith(VIDEO_SUFFIXES)
-            and QuarkChannel._episode_of(str(item.get("name") or "")) in wanted
+            and bool(set(QuarkChannel._episode_range(str(item.get("name") or ""))) & wanted)
         ]
         return matched
 
     @staticmethod
     def _episode_of(name: str) -> Optional[int]:
-        """从文件名解析集号。
-
-        支持 S01E01-E02、EP01-02、01-02 等连集写法；连集只返回起始集号，
-        因为 MoviePilot 的 episodes 是集号集合，本插件不再展开区间（局限）。
-        """
-        for pattern in EPISODE_PATTERNS:
-            match = pattern.search(name)
-            if match:
-                try:
-                    return int(match.group(match.lastindex or 1))
-                except (TypeError, ValueError):
-                    continue
-        return None
+        """从文件名解析集号；连集写法返回起始集号（区间展开见 _episode_range）。"""
+        episodes = QuarkChannel._episode_range(name)
+        return episodes[0] if episodes else None
 
     @staticmethod
     def _map_state(state: str) -> str:

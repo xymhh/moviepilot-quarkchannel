@@ -266,9 +266,9 @@ def test_search_expands_cached_episodes_with_fid():
         {"url": url, "title": "演示剧集", "size": 606, "source": "pansou"},
     ])
     rows = plugin.search_torrents(keyword="演示")
-    # 整包在前，后面是展开出的单集
+    # 整包在前，后面是展开出的单集；整包标题带集数范围
     assert [item.title for item in rows] == [
-        "演示剧集", "演示 S01E01", "演示 S01E02", "演示 S01E03",
+        "演示剧集 S01E01-E03", "演示 S01E01", "演示 S01E02", "演示 S01E03",
     ]
     assert [item.size for item in rows] == [606.0, 101.0, 202.0, 303.0]
     assert [item.pri_order for item in rows] == [5, 5, 5, 5]
@@ -278,7 +278,7 @@ def test_search_expands_cached_episodes_with_fid():
 
 
 def test_search_collapses_each_share_when_expand_disabled():
-    """默认关闭展开时，一个分享只返回一条整包候选。"""
+    """关闭展开时，一个分享只返回一条整包候选。"""
     url = "https://pan.quark.cn/s/collapse"
     sid = build_sid(url)
     entry = ShareEntry(
@@ -302,7 +302,7 @@ def test_search_collapses_each_share_when_expand_disabled():
                                "source": "pansou"}])
     rows = plugin.search_torrents(keyword="聚合")
     assert len(rows) == 1
-    assert rows[0].title == "聚合剧集"
+    assert rows[0].title == "聚合剧集 S01E01-E02"
     assert rows[0].size == 303.0
     assert "2 个文件 · 可在插件内选集" in rows[0].description
     assert "fid=" not in rows[0].enclosure
@@ -357,7 +357,7 @@ def test_search_does_not_expand_movie_snapshot():
 
 
 def test_search_dedupes_episode_and_keeps_largest_file():
-    """同一集号只保留体积最大的文件，并按集号输出。"""
+    """同一集号按（集号，画质）去重：每集每画质保留体积最大的文件。"""
     url = "https://pan.quark.cn/s/dupep"
     sid = build_sid(url)
     entry = ShareEntry(
@@ -380,11 +380,16 @@ def test_search_dedupes_episode_and_keeps_largest_file():
     plugin._tg_index = None
     plugin._pansou = _Pansou([{"url": url, "title": "重复集", "source": "pansou"}])
     rows = plugin.search_torrents(keyword="重复")
-    # 1 条整包 + 2 条单集（同集号只保留体积最大的文件）
-    assert len(rows) == 3
+    # 1 条整包 + 3 条单集（E01 的 1080p 与 720p 都保留）
+    assert len(rows) == 4
+    assert rows[0].title == "重复集 S01E01-E02"
+    assert [item.title for item in rows[1:]] == [
+        "重复 S01E01 1080p", "重复 S01E01 720p", "重复 S01E02",
+    ]
     assert "fid=" not in rows[0].enclosure
     assert rows[1].size == 300.0 and "fid=large" in rows[1].enclosure
-    assert rows[2].size == 200.0 and "fid=e2" in rows[2].enclosure
+    assert rows[2].size == 100.0 and "fid=small" in rows[2].enclosure
+    assert rows[3].size == 200.0 and "fid=e2" in rows[3].enclosure
 
 
 def test_search_falls_back_to_legacy_when_channels_empty(tmp_path: Path):
