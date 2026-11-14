@@ -1,11 +1,6 @@
 <template>
   <div class="qc-page">
-    <v-tabs v-model="tab" density="compact" class="mb-2">
-      <v-tab value="channels">渠道</v-tab>
-      <v-tab value="search">搜索下载</v-tab>
-    </v-tabs>
-
-    <div v-if="tab === 'channels'">
+    <template>
     <v-row dense class="mb-2">
       <v-col cols="6" sm="3">
         <v-chip size="small" variant="tonal" color="primary" prepend-icon="mdi-rss">
@@ -158,100 +153,6 @@
       </div>
       <v-btn color="primary" size="small" prepend-icon="mdi-plus" @click="openCreate">新增渠道</v-btn>
     </v-card>
-    </div>
-
-    <div v-else-if="tab === 'search'">
-      <v-row dense align="center" class="mb-2">
-        <v-col cols="12" md="9">
-          <v-text-field
-            v-model="downloadSearch"
-            density="compact"
-            variant="outlined"
-            hide-details
-            clearable
-            prepend-inner-icon="mdi-magnify"
-            placeholder="输入片名，搜索所有已启用渠道"
-            @keyup.enter="searchShares"
-          />
-        </v-col>
-        <v-col cols="12" md="3">
-          <v-btn
-            block
-            color="primary"
-            prepend-icon="mdi-magnify"
-            :loading="searching"
-            @click="searchShares"
-          >
-            搜索
-          </v-btn>
-        </v-col>
-      </v-row>
-
-      <div v-if="searching" class="py-10 text-center">
-        <v-progress-circular indeterminate color="primary" />
-        <div class="text-caption mt-3">正在搜索各渠道…</div>
-      </div>
-
-      <v-row v-else-if="shares.length" dense>
-        <v-col v-for="share in shares" :key="share.sid" cols="12" sm="6" md="4" lg="3">
-          <v-card variant="outlined" class="qc-share-card">
-            <v-card-item class="pb-1">
-              <v-card-title class="qc-title" :title="share.title">
-                {{ share.title || "未命名分享" }}
-              </v-card-title>
-              <template #append>
-                <v-chip size="x-small" variant="tonal">{{ share.site_name || "渠道" }}</v-chip>
-              </template>
-            </v-card-item>
-            <v-card-text class="py-1">
-              <div class="d-flex flex-wrap ga-1">
-                <v-chip size="x-small" variant="tonal" prepend-icon="mdi-folder-outline">
-                  {{ share.files || 0 }} 个文件
-                </v-chip>
-                <v-chip size="x-small" variant="tonal" prepend-icon="mdi-harddisk">
-                  {{ formatSize(share.size) }}
-                </v-chip>
-              </div>
-            </v-card-text>
-            <v-spacer />
-            <v-card-actions class="pt-1">
-              <v-btn
-                size="small"
-                variant="tonal"
-                color="primary"
-                prepend-icon="mdi-format-list-bulleted"
-                @click="openEpisodes(share)"
-              >
-                选集
-              </v-btn>
-              <v-spacer />
-              <v-btn
-                size="small"
-                variant="text"
-                prepend-icon="mdi-download"
-                :loading="downloadingSid === share.sid"
-                @click="downloadWhole(share)"
-              >
-                整包
-              </v-btn>
-            </v-card-actions>
-          </v-card>
-        </v-col>
-      </v-row>
-
-      <v-card v-else-if="searchDone" variant="tonal" class="pa-6 text-center">
-        <v-icon icon="mdi-magnify-close" size="38" class="mb-2" />
-        <div class="text-body-2">没有找到分享，换个关键词试试</div>
-      </v-card>
-
-      <v-card v-else variant="tonal" class="pa-6 text-center">
-        <v-icon icon="mdi-cloud-search-outline" size="38" class="mb-2" />
-        <div class="text-body-2 mb-1">输入片名后搜索</div>
-        <div class="text-caption text-medium-emphasis">
-          一个分享只显示一条，点「选集」再勾选需要的集
-        </div>
-      </v-card>
-    </div>
 
     <v-navigation-drawer
       v-if="detail"
@@ -301,79 +202,6 @@
         <v-btn variant="text" @click="detailOpen = false">关闭</v-btn>
         <v-spacer />
         <v-btn color="primary" @click="editFromDetail">编辑</v-btn>
-      </div>
-    </v-navigation-drawer>
-
-    <v-navigation-drawer
-      v-if="episodeShare"
-      :model-value="episodeOpen"
-      temporary
-      location="right"
-      :width="isMobile ? '100%' : 420"
-      @update:model-value="episodeOpen = $event"
-    >
-      <div class="d-flex align-center pa-3">
-        <div class="qc-drawer-heading">
-          <div class="text-subtitle-1">选集下载</div>
-          <div class="text-caption text-medium-emphasis qc-drawer-subtitle" :title="episodeShare.title">
-            {{ episodeShare.title }}
-          </div>
-        </div>
-        <v-spacer />
-        <v-btn icon="mdi-close" size="small" variant="text" @click="episodeOpen = false" />
-      </div>
-      <v-divider />
-      <div class="px-3 py-1 d-flex align-center flex-wrap ga-1">
-        <v-btn size="x-small" variant="text" @click="selectAllEpisodes">全选</v-btn>
-        <v-btn size="x-small" variant="text" @click="invertEpisodes">反选</v-btn>
-        <v-btn size="x-small" variant="text" @click="clearEpisodes">清空</v-btn>
-        <v-spacer />
-        <span class="text-caption">已选 {{ episodeChecked.size }} 项</span>
-      </div>
-      <v-divider />
-      <div v-if="episodesLoading" class="py-10 text-center">
-        <v-progress-circular indeterminate color="primary" />
-        <div class="text-caption mt-2">正在读取文件…</div>
-      </div>
-      <v-list v-else-if="episodes.length" density="compact" class="qc-episode-list">
-        <v-list-item v-for="file in episodes" :key="fileKey(file)">
-          <template #prepend>
-            <v-checkbox-btn
-              :model-value="episodeChecked.has(fileKey(file))"
-              density="compact"
-              hide-details
-              @update:model-value="toggleEpisode(file, $event)"
-            />
-          </template>
-          <v-list-item-title class="qc-episode-name" :title="file.name">
-            <v-chip
-              v-if="file.episode"
-              size="x-small"
-              variant="tonal"
-              color="primary"
-              class="flex-shrink-0"
-            >
-              {{ episodeLabel(file.episode) }}
-            </v-chip>
-            <span class="text-truncate">{{ file.name }}</span>
-          </v-list-item-title>
-          <v-list-item-subtitle>{{ formatSize(file.size) }}</v-list-item-subtitle>
-        </v-list-item>
-      </v-list>
-      <v-card v-else variant="tonal" class="ma-3 pa-4 text-center">
-        <div class="text-body-2">没有可下载的文件</div>
-      </v-card>
-      <div class="qc-drawer-footer">
-        <v-btn
-          block
-          color="primary"
-          prepend-icon="mdi-download"
-          :loading="downloading"
-          :disabled="!episodeChecked.size"
-          @click="downloadSelected"
-        >
-          下载已选（{{ episodeChecked.size }} 项 · {{ formatSize(selectedEpisodeSize) }}）
-        </v-btn>
       </div>
     </v-navigation-drawer>
 
@@ -534,6 +362,7 @@
     <v-snackbar v-model="snack.show" :timeout="3000" :color="snack.color" location="bottom">
       {{ snack.text }}
     </v-snackbar>
+    </template>
   </div>
 </template>
 
@@ -566,20 +395,6 @@ const deleting = ref(null)
 
 const detailOpen = ref(false)
 const detail = ref(null)
-
-const tab = ref("channels")
-const downloadSearch = ref("")
-const shares = ref([])
-const searching = ref(false)
-const searchDone = ref(false)
-const downloadingSid = ref("")
-
-const episodeShare = ref(null)
-const episodeOpen = ref(false)
-const episodes = ref([])
-const episodesLoading = ref(false)
-const episodeChecked = ref(new Set())
-const downloading = ref(false)
 
 const snack = reactive({ show: false, text: "", color: "success" })
 
@@ -665,11 +480,6 @@ const lastPollText = computed(() => {
   return `同步 ${relativeTime(summary.last_poll)}`
 })
 
-const selectedEpisodeSize = computed(() => episodes.value.reduce((total, file) => {
-  if (!episodeChecked.value.has(fileKey(file))) return total
-  return total + Number(file.size || 0)
-}, 0))
-
 function typeLabel(type) {
   return type === "tg_channel" ? "TG 频道" : "盘搜"
 }
@@ -724,159 +534,6 @@ async function loadSummary() {
   } catch (error) {
     /* 汇总失败不影响列表 */
   }
-}
-
-function fileKey(file) {
-  return String(file?.fid || file?.name || "")
-}
-
-function formatSize(value) {
-  const size = Number(value || 0)
-  if (!size) return "0 B"
-  const units = ["B", "KB", "MB", "GB", "TB"]
-  let index = 0
-  let amount = size
-  while (amount >= 1024 && index < units.length - 1) {
-    amount /= 1024
-    index += 1
-  }
-  const digits = amount >= 100 || index === 0 ? 0 : 1
-  return `${amount.toFixed(digits)} ${units[index]}`
-}
-
-function episodeLabel(episode) {
-  return `第 ${episode} 集`
-}
-
-async function searchShares() {
-  const keyword = downloadSearch.value.trim()
-  if (!keyword) {
-    notify("请输入要搜索的片名", "warning")
-    return
-  }
-  searching.value = true
-  searchDone.value = false
-  shares.value = []
-  try {
-    const query = `keyword=${encodeURIComponent(keyword)}&limit=50`
-    const body = await request("get", `plugin/${props.pluginId}/shares?${query}`)
-    if (body?.success === false) {
-      notify(body?.message || "搜索失败", "warning")
-      return
-    }
-    shares.value = body?.items || []
-    searchDone.value = true
-    if (shares.value.length) await loadSummary()
-  } catch (error) {
-    notify(`搜索失败：${error.message}`, "error")
-  } finally {
-    searching.value = false
-  }
-}
-
-async function openEpisodes(share) {
-  episodeShare.value = share
-  episodeOpen.value = true
-  episodes.value = []
-  episodeChecked.value = new Set()
-  episodesLoading.value = true
-  try {
-    const sid = encodeURIComponent(share.sid)
-    const body = await request("get", `plugin/${props.pluginId}/shares/${sid}/episodes`)
-    if (body?.success === false) {
-      notify(body?.message || "加载集数失败", "warning")
-      return
-    }
-    episodes.value = body?.items || []
-  } catch (error) {
-    notify(`加载集数失败：${error.message}`, "error")
-  } finally {
-    episodesLoading.value = false
-  }
-}
-
-function toggleEpisode(file, value) {
-  const next = new Set(episodeChecked.value)
-  const key = fileKey(file)
-  if (value) next.add(key)
-  else next.delete(key)
-  episodeChecked.value = next
-}
-
-function selectAllEpisodes() {
-  episodeChecked.value = new Set(episodes.value.map(fileKey))
-}
-
-function clearEpisodes() {
-  episodeChecked.value = new Set()
-}
-
-function invertEpisodes() {
-  const next = new Set()
-  for (const file of episodes.value) {
-    const key = fileKey(file)
-    if (!episodeChecked.value.has(key)) next.add(key)
-  }
-  episodeChecked.value = next
-}
-
-function selectedFiles() {
-  return episodes.value.filter((file) => episodeChecked.value.has(fileKey(file)))
-}
-
-async function submitDownload(share, payload, label) {
-  downloading.value = true
-  try {
-    const body = await request("post", `plugin/${props.pluginId}/download_episodes`, {
-      sid: share.sid,
-      ...payload,
-    })
-    if (body?.success === false) {
-      notify(body?.message || "下载提交失败", "warning")
-      return false
-    }
-    notify(`已提交${label} ${body?.count || 0} 个文件`)
-    await loadSummary()
-    return true
-  } catch (error) {
-    notify(`下载提交失败：${error.message}`, "error")
-    return false
-  } finally {
-    downloading.value = false
-  }
-}
-
-async function downloadWhole(share) {
-  downloadingSid.value = share.sid
-  try {
-    await submitDownload(share, {}, "整包")
-  } finally {
-    downloadingSid.value = ""
-  }
-}
-
-async function downloadSelected() {
-  if (!episodeShare.value) return
-  const files = selectedFiles()
-  if (!files.length) {
-    notify("请先勾选要下载的文件", "warning")
-    return
-  }
-  const fids = files.map((file) => String(file.fid || "")).filter(Boolean)
-  const wantedEpisodes = files
-    .map((file) => Number(file.episode || 0))
-    .filter((episode) => episode > 0)
-  let payload
-  if (fids.length === files.length) {
-    payload = { fids }
-  } else if (wantedEpisodes.length === files.length) {
-    payload = { episodes: wantedEpisodes }
-  } else {
-    notify("部分文件缺少可用的集号或文件标识", "warning")
-    return
-  }
-  const ok = await submitDownload(episodeShare.value, payload, "选集")
-  if (ok) episodeOpen.value = false
 }
 
 function openCreate() {
@@ -1100,41 +757,5 @@ onMounted(async () => {
 
 .qc-switch {
   flex: 0 0 auto;
-}
-
-.qc-share-card {
-  min-height: 142px;
-  display: flex;
-  flex-direction: column;
-}
-
-.qc-drawer-heading {
-  min-width: 0;
-}
-
-.qc-drawer-subtitle {
-  max-width: 280px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.qc-episode-list {
-  padding-bottom: 84px;
-}
-
-.qc-episode-name {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-
-.qc-drawer-footer {
-  position: sticky;
-  bottom: 0;
-  padding: 12px;
-  border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
-  background: rgb(var(--v-theme-surface));
 }
 </style>
