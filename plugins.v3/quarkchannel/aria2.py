@@ -183,6 +183,17 @@ class Aria2Launcher:
             "--max-connection-per-server=64",
             "--split=64",
             "--min-split-size=1M",
+            # 与生产实现对齐：磁盘缓存与并发上限对速度影响最大
+            "--disk-cache=32M",
+            "--max-concurrent-downloads=2",
+            "--check-certificate=true",
+            "--follow-torrent=false",
+            "--enable-dht=false",
+            "--bt-enable-lpd=false",
+            "--console-log-level=warn",
+            "--log-level=warn",
+            "--summary-interval=0",
+            "--quiet=true",
             "--disable-ipv6",
             f"--log={log_path}",
         ]
