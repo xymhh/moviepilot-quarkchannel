@@ -84,7 +84,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.8.4"
+    plugin_version = "0.8.5"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -664,14 +664,24 @@ class QuarkChannel(_PluginBase):
 
     def get_sidebar_nav(self) -> list[dict]:
         """在系统侧栏注册渠道管理入口。"""
-        return [{
-            "nav_key": "channels",
-            "title": "渠道管理",
-            "icon": "mdi-rss",
-            "section": "system",
-            "permission": "manage",
-            "order": 6,
-        }]
+        return [
+            {
+                "nav_key": "channels",
+                "title": "渠道管理",
+                "icon": "mdi-rss",
+                "section": "system",
+                "permission": "manage",
+                "order": 6,
+            },
+            {
+                "nav_key": "settings",
+                "title": "直链设置",
+                "icon": "mdi-cog",
+                "section": "system",
+                "permission": "manage",
+                "order": 7,
+            },
+        ]
 
     def get_page(self) -> Optional[list[dict]]:
         """返回插件详情页；插件尚未初始化时按空任务展示。"""
