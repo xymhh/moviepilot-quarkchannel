@@ -161,6 +161,18 @@
                   density="comfortable"
                   hide-details="auto" />
               </v-col>
+              <v-col cols="12">
+                <v-textarea
+                  v-model="form.quark_cookie"
+                  label="夸克 Cookie"
+                  rows="3"
+                  auto-grow
+                  variant="outlined"
+                  density="comfortable"
+                  hint="转存与取直链必需；从浏览器 pan.quark.cn 请求头复制整段 Cookie，勿外泄"
+                  persistent-hint
+                  autocomplete="off" />
+              </v-col>
             </v-row>
           </v-card-text>
         </v-card>
@@ -295,6 +307,7 @@ const defaults = () => ({
   aria2_connections: 64,
   aria2_split: 64,
   keep_saved: false,
+  quark_cookie: "",
   tg_api_id: "",
   tg_api_hash: "",
   tg_session: "",
@@ -313,6 +326,7 @@ function applyConfig(config) {
   form.max_tasks = Number(form.max_tasks || 3)
   form.aria2_connections = Number(form.aria2_connections || 64)
   form.aria2_split = Number(form.aria2_split || 64)
+  form.quark_cookie = String(form.quark_cookie ?? "")
   form.tg_api_id = String(form.tg_api_id ?? "")
   form.tg_api_hash = String(form.tg_api_hash ?? "")
   form.tg_session = String(form.tg_session ?? "")
