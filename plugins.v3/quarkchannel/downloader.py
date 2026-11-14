@@ -37,11 +37,17 @@ class TaskFile:
     done: int = 0
     fid: str = ""
     share_token: str = ""
+    out_name: str = ""
 
     @property
     def rel_path(self) -> str:
         """相对路径，去掉可能存在的目录前缀穿越。"""
         return Path(self.name).name
+
+    @property
+    def dest_name(self) -> str:
+        """落盘文件名：优先使用下载时重命名后的名字。"""
+        return Path(self.out_name).name if self.out_name else self.rel_path
 
 
 @dataclass
@@ -289,7 +295,7 @@ class DownloadManager:
             for item in task.files:
                 if item.done >= item.size > 0:
                     continue
-                destination = root / item.rel_path
+                destination = root / item.dest_name
                 if destination.exists() and destination.stat().st_size == item.size:
                     item.done = item.size
                     continue
@@ -375,7 +381,7 @@ class DownloadManager:
         ]
         options = {
             "dir": task.content_path,
-            "out": item.rel_path,
+            "out": item.dest_name,
             "header": header_list,
             "split": str(self._aria2_split),
             "max-connection-per-server": str(self._aria2_connections),
@@ -404,7 +410,7 @@ class DownloadManager:
             with self._lock:
                 item.done = 0
             try:
-                (Path(task.content_path) / item.rel_path).unlink(missing_ok=True)
+                (Path(task.content_path) / item.dest_name).unlink(missing_ok=True)
             except OSError:
                 pass
 
@@ -704,7 +710,7 @@ class DownloadManager:
                 fid=item.fid, name=item.name, size=item.size, share_token=item.share_token,
             )
             url, headers = client.download_url(share_url, passcode, share_file)
-        destination = Path(task.content_path) / item.rel_path
+        destination = Path(task.content_path) / item.dest_name
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists() and destination.stat().st_size == item.size:
             with self._lock:

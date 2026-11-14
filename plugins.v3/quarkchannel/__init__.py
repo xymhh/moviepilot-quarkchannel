@@ -85,7 +85,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.10.9"
+    plugin_version = "0.11.0"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -708,6 +708,7 @@ class QuarkChannel(_PluginBase):
             "aria2_connections": 64,
             "aria2_split": 64,
             "keep_saved": False,
+            "rename_on_download": True,
             "mp_base_url": "http://127.0.0.1:3000",
         }
         return [{"component": "VForm", "content": [tabs, window]}], defaults
@@ -780,6 +781,22 @@ class QuarkChannel(_PluginBase):
             candidates = self._collect_channel_candidates(channels, keyword, limit)
         else:
             candidates = self._collect_legacy_candidates(keyword, limit)
+        # 首轮搜索：对前两个候选同步取一次快照，保证「按集展开」立刻可用，
+        # 否则要等下一轮预热完成才能选单集。
+        missing_inline = [
+            item for item in candidates
+            if item.get("url") and not self._cached_entry(item.get("sid", ""))
+        ][:2]
+        if missing_inline:
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=len(missing_inline)) as pool:
+                list(pool.map(
+                    lambda item: self._ensure_entry(
+                        item["url"], item.get("passcode", ""), item.get("title", "")
+                    ),
+                    missing_inline,
+                ))
         results: list[TorrentInfo] = []
         for candidate in candidates:
             results.extend(self._results_for_candidate(candidate, mtype))
@@ -1145,6 +1162,7 @@ class QuarkChannel(_PluginBase):
                     size=int(item.get("size") or 0),
                     fid=str(item.get("fid") or ""),
                     share_token=str(item.get("share_token") or ""),
+                    out_name=self._build_out_name(entry, item),
                 )
                 for item in selected
             ],
@@ -1817,6 +1835,34 @@ class QuarkChannel(_PluginBase):
         if self._cache:
             self._cache.put(entry)
         return entry
+
+    def _build_out_name(self, entry: ShareEntry, item: dict) -> str:
+        """下载时按「剧名 SxxExx」重命名落盘文件。
+
+        :param entry: 分享快照
+        :param item: 文件条目（含 name/size）
+        :return: 目标文件名；关闭重命名时返回空串
+        """
+        if not bool(self._config.get("rename_on_download", True)):
+            return ""
+        raw_name = str(item.get("name") or "")
+        suffix = Path(raw_name).suffix.lower() or ".mkv"
+        base = entry.folder_name or "video"
+        # 去掉标题里常见的发布标记，避免文件名过长
+        for token in ("名称：", "名称:", "【", "】", "[", "]"):
+            base = base.replace(token, " ")
+        base = " ".join(base.split())[:80]
+        episode = self._episode_of(raw_name)
+        if episode is None:
+            return ""
+        season = 1
+        match = re.search(r"[Ss](\d{1,2})[Ee]\d{1,4}", raw_name)
+        if match:
+            try:
+                season = int(match.group(1))
+            except (TypeError, ValueError):
+                season = 1
+        return f"{base} S{season:02d}E{episode:02d}{suffix}"
 
     @staticmethod
     def _select_files(entry: ShareEntry, episodes: Optional[set]) -> list[dict]:

@@ -161,6 +161,15 @@
                   density="comfortable"
                   hide-details="auto" />
               </v-col>
+              <v-col :cols="isMobile ? 12 : 6">
+                <v-switch
+                  v-model="form.rename_on_download"
+                  label="下载时重命名"
+                  hint="按「剧名 SxxEyy」落盘，整理时无需再改名"
+                  color="primary"
+                  density="comfortable"
+                  hide-details="auto" />
+              </v-col>
               <v-col cols="12">
                 <v-textarea
                   v-model="form.quark_cookie"
@@ -307,6 +316,7 @@ const defaults = () => ({
   aria2_connections: 64,
   aria2_split: 64,
   keep_saved: false,
+  rename_on_download: true,
   quark_cookie: "",
   tg_api_id: "",
   tg_api_hash: "",
@@ -323,6 +333,7 @@ function applyConfig(config) {
   form.only_whitelist = Boolean(form.only_whitelist)
   form.aria2_enabled = Boolean(form.aria2_enabled)
   form.keep_saved = Boolean(form.keep_saved)
+  form.rename_on_download = form.rename_on_download !== false
   form.max_tasks = Number(form.max_tasks || 3)
   form.aria2_connections = Number(form.aria2_connections || 64)
   form.aria2_split = Number(form.aria2_split || 64)
