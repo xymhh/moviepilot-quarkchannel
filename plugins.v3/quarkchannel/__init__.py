@@ -74,7 +74,7 @@ EPISODE_PATTERNS = (
 )
 STORAGE_PREFIX = ("u115:", "alipan:", "rclone:", "alist:", "alistgo:", "smb:")
 SEASON_EPISODE_RE = re.compile(r"[Ss](\d{1,2})[._ ]?[Ee](\d{1,4})")
-MAX_EXPAND_FILES = 30
+MAX_EXPAND_FILES = 0  # 0 表示不限制，按集完整展开
 PENDING_SHARE_LIMIT = 500
 PREWARM_COUNT = 2
 PREWARM_DELAY_SECONDS = 0.2
@@ -87,7 +87,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.12.2"
+    plugin_version = "0.12.3"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -620,7 +620,9 @@ class QuarkChannel(_PluginBase):
             field("max_tasks", "并发下载任务数", kind="number", cols=4),
             field("only_whitelist", "仅白名单关键词生效", kind="switch", cols=4),
             field("expand_in_search", "搜索结果按集展开", kind="switch", cols=4,
-                  hint="关闭时一个分享只显示一条，可在插件内选集"),
+                  hint="开启后每个集数单独一条，可直接点某一集下载"),
+            field("expand_max_files", "单次最多展开集数", kind="number", cols=4,
+                  hint="0 表示不限制（完整展开）"),
             field("keyword_whitelist", "关键词白名单", cols=4,
                   placeholder="多个关键词用英文逗号分隔"),
         ])
@@ -718,7 +720,8 @@ class QuarkChannel(_PluginBase):
             "download_root": "/downloads",
             "max_tasks": 3,
             "only_whitelist": False,
-            "expand_in_search": False,
+            "expand_in_search": True,
+            "expand_max_files": 0,
             "keyword_whitelist": "",
             "pansou_url": "",
             "pansou_src": "all",
@@ -841,8 +844,12 @@ class QuarkChannel(_PluginBase):
                     logger.debug(f"分享快照失败：{type(error).__name__}")
             pool.shutdown(wait=False)
         results: list[TorrentInfo] = []
-        for candidate in candidates:
-            results.extend(self._results_for_candidate(candidate, mtype))
+        if bool(self._config.get("expand_in_search", True)):
+            results.extend(self._expanded_results(candidates, mtype))
+        else:
+            results.extend(self._results_for_candidate(candidate, mtype)
+                           for candidate in candidates)
+            results = [item for group in results for item in group]
         # 可分集的单集条目排在整包前面，方便直接选集
         # 稳定排序：单集条目在前，整包在后，保持集号顺序不变
         results.sort(key=lambda item: 0 if "fid=" in (item.enclosure or "") else 1)
@@ -1089,7 +1096,8 @@ class QuarkChannel(_PluginBase):
             return []
         share_title = str(candidate.get("title") or entry.title or entry.folder_name).strip()
         results: list[TorrentInfo] = []
-        for episode, (size, item) in sorted(by_episode.items())[:MAX_EXPAND_FILES]:
+        limit = self._expand_limit()
+        for episode, (size, item) in sorted(by_episode.items())[:limit or None]:
             file_name = str(item.get("name") or "file")
             title = f"{share_title} {self._episode_label(file_name, episode)}".strip()
             results.append(self._make_torrent(
@@ -1097,6 +1105,57 @@ class QuarkChannel(_PluginBase):
                 str(item.get("fid") or ""), mtype, f"单集 · {file_name}",
             ))
         return results
+
+    def _expanded_results(self, candidates: list[dict],
+                           mtype: Optional[MediaType]) -> list[TorrentInfo]:
+        """把候选按集号合并展开：同一集保留体积最大的版本，集数完整不重复。"""
+        merged: dict[int, tuple[float, dict, dict]] = {}
+        packs: list[TorrentInfo] = []
+        for candidate in candidates:
+            entry = self._candidate_entry(candidate)
+            if not entry:
+                packs.append(self._whole_candidate(candidate, None, mtype))
+                continue
+            by_episode: dict[int, tuple[int, dict]] = {}
+            for item in entry.files:
+                if not isinstance(item, dict) or item.get("dir"):
+                    continue
+                size = self._size_of(item.get("size"))
+                fid = str(item.get("fid") or "").strip()
+                if size <= 0 or not fid:
+                    continue
+                episode = self._episode_of(str(item.get("name") or ""))
+                if episode is None:
+                    continue
+                existing = by_episode.get(episode)
+                if existing is None or size > existing[0]:
+                    by_episode[episode] = (size, item)
+            if not by_episode:
+                packs.append(self._whole_candidate(candidate, entry, mtype))
+                continue
+            for episode, (size, item) in by_episode.items():
+                current = merged.get(episode)
+                if current is None or size > current[0]:
+                    merged[episode] = (size, item, candidate)
+        results: list[TorrentInfo] = []
+        limit = self._expand_limit()
+        for episode, (size, item, candidate) in sorted(merged.items())[:limit or None]:
+            file_name = str(item.get("name") or "file")
+            share_title = str(candidate.get("title") or "").strip()
+            title = f"{share_title} {self._episode_label(file_name, episode)}".strip()
+            results.append(self._make_torrent(
+                candidate, title, size, int(candidate.get("expand_pri") or 5),
+                str(item.get("fid") or ""), mtype, f"单集 · {file_name}",
+            ))
+        results.extend(packs)
+        return results
+
+    def _expand_limit(self) -> int:
+        """单次搜索最多展开多少集；0 表示不限制（默认完整展开）。"""
+        try:
+            return max(0, int(self._config.get("expand_max_files") or 0))
+        except (TypeError, ValueError):
+            return 0
 
     def _whole_candidate(self, candidate: dict, entry: Optional[ShareEntry],
                          mtype: Optional[MediaType]) -> TorrentInfo:
@@ -1820,7 +1879,7 @@ class QuarkChannel(_PluginBase):
                 "auto_pick_enabled": bool(picker.enabled) if picker else False,
                 "auto_pick_dry_run": bool(picker.dry_run) if picker else True,
                 "auto_pick_picks": auto_pick_picks,
-                "expand_in_search": bool(self._config.get("expand_in_search", False)),
+                "expand_in_search": bool(self._config.get("expand_in_search", True)),
                 "channels": len(channel_items),
                 "channel_stats": channel_stats,
                 "channel_last_scan": {

@@ -291,7 +291,7 @@ def test_search_collapses_each_share_when_expand_disabled():
     )
     plugin = QuarkChannel()
     plugin._enabled = True
-    plugin._config = {"max_results": 5}
+    plugin._config = {"max_results": 5, "expand_in_search": False}
     plugin._secret = "secret"
     plugin._cache = _Cache(entry)
     plugin._tg_index = None

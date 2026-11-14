@@ -237,7 +237,7 @@ def test_status_and_form_expose_expand_in_search():
     plugin._config = {}
     plugin._manager = None
     plugin._cache = None
-    assert plugin.api_status()["data"]["expand_in_search"] is False
+    assert plugin.api_status()["data"]["expand_in_search"] is True
     plugin._config = {"expand_in_search": True}
     assert plugin.api_status()["data"]["expand_in_search"] is True
     form, defaults = plugin.get_form()
