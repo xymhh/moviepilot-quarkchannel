@@ -60,6 +60,7 @@ class DownloadTask:
     files: list[TaskFile] = field(default_factory=list)
     share_url: str = ""
     passcode: str = ""
+    gids: list[str] = field(default_factory=list)
     created_at: float = 0.0
     updated_at: float = 0.0
     speed: float = 0.0
@@ -109,6 +110,11 @@ class DownloadManager:
         self._aria2_launcher = aria2_launcher
         self._aria2_gids: dict[str, list[str]] = {}
         self._load()
+        for task in list(self._tasks.values()):
+            if task.state == STATE_DOWNLOADING and task.gids:
+                self._stops[task.hash] = threading.Event()
+                self._pool.submit(self._watch_aria2, task.hash)
+        self._attach_existing()
 
     # ---------- 持久化 ----------
 
@@ -127,9 +133,12 @@ class DownloadManager:
             except TypeError:
                 continue
             task.files = files
-            if task.state == STATE_DOWNLOADING:
+            if task.state == STATE_DOWNLOADING and not task.gids:
+                # 没有 aria2 gid 的残留任务无法续跑，标记停等等待手动恢复
                 task.state = STATE_STOPPED
             self._tasks[task.hash] = task
+            if task.gids:
+                self._aria2_gids[task.hash] = list(task.gids)
 
     def _flush(self) -> None:
         """写回任务快照。"""
@@ -405,6 +414,94 @@ class DownloadManager:
             except OSError:
                 pass
 
+    def _attach_existing(self) -> None:
+        """把 aria2 中仍在跑的任务挂回本地任务（插件重载后进度不丢）。"""
+        launcher = self._aria2_launcher
+        rpc = getattr(launcher, "rpc", None) if launcher else None
+        if rpc is None:
+            return
+        try:
+            if not launcher.ensure():
+                return
+            entries = list(rpc.tell_active()) + list(rpc.tell_waiting())
+        except Exception as error:  # noqa: BLE001 - 接管失败不影响其它流程
+            logger.warning(f"读取 aria2 任务列表失败：{type(error).__name__}")
+            return
+        by_dir: dict[str, list[str]] = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            gid = str(entry.get("gid") or "")
+            directory = str(entry.get("dir") or "")
+            if gid and directory:
+                by_dir.setdefault(directory.rstrip("/"), []).append(gid)
+        for task in list(self._tasks.values()):
+            if task.gids:
+                continue
+            gids = by_dir.get(str(task.content_path).rstrip("/"))
+            if not gids:
+                continue
+            with self._lock:
+                task.gids = list(gids)
+                task.state = STATE_DOWNLOADING
+                self._aria2_gids[task.hash] = list(gids)
+                self._stops[task.hash] = threading.Event()
+                self._flush()
+            logger.info(f"已接管 aria2 中运行的任务：{task.title}")
+            self._pool.submit(self._watch_aria2, task.hash)
+
+    def _watch_aria2(self, task_hash: str) -> None:
+        """插件重载后接管仍在 aria2 中运行的任务。
+
+        :param task_hash: 任务 hash
+        """
+        task = self.get(task_hash)
+        event = self._stops.get(task_hash)
+        launcher = self._aria2_launcher
+        rpc = getattr(launcher, "rpc", None) if launcher else None
+        if not task or not event or rpc is None:
+            return
+        gids = self._aria2_gids.get(task_hash) or []
+        if not gids:
+            return
+        logger.info(f"接管 aria2 中未完成的下载：{task.title}（{len(gids)} 个任务）")
+        while not event.is_set():
+            total_done = 0
+            total_speed = 0
+            all_complete = True
+            for gid in gids:
+                status = rpc.tell_status(gid)
+                if not isinstance(status, dict):
+                    with self._lock:
+                        task.state = STATE_ERROR
+                        task.error = "aria2 任务丢失"
+                        self._flush()
+                    return
+                state = str(status.get("status") or "")
+                try:
+                    total_done += int(status.get("completedLength") or 0)
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    total_speed += int(status.get("downloadSpeed") or 0)
+                except (TypeError, ValueError):
+                    pass
+                if state != "complete":
+                    all_complete = False
+            with self._lock:
+                task.done = min(task.total, total_done) if task.total else total_done
+                task.speed = float(total_speed)
+                task.updated_at = time.time()
+                if all_complete:
+                    task.gids = []
+                    task.state = STATE_COMPLETED
+                    task.done = task.total or total_done
+                    self._flush()
+                    logger.info(f"接管任务下载完成：{task.title}")
+                    return
+                self._flush()
+            time.sleep(3)
+
     def _run_aria2(self, task: DownloadTask, event: threading.Event,
                    client: QuarkShareClient, pending: list[TaskFile],
                    saved_map: dict[int, str]) -> str:
@@ -448,6 +545,8 @@ class DownloadManager:
                 records.append((item, gid))
                 with self._lock:
                     self._aria2_gids.setdefault(task.hash, []).append(gid)
+                    task.gids = list(self._aria2_gids[task.hash])
+                    self._flush()
         except Exception as error:  # noqa: BLE001 - 取链或添加异常回落
             logger.warning(f"aria2 取链/添加异常，回落到自研分片下载：{error}")
             self._remove_aria2_gids([gid for _item, gid in records])

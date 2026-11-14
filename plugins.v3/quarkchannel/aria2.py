@@ -73,6 +73,24 @@ class Aria2Rpc:
         result = self._call("aria2.addUri", [[url], options or {}])
         return str(result) if result else None
 
+    def tell_active(self) -> list[dict]:
+        """返回当前正在下载的任务列表。
+
+        :return: aria2 任务字典列表
+        """
+        result = self._call("aria2.tellActive", [])
+        return result if isinstance(result, list) else []
+
+    def tell_waiting(self, offset: int = 0, num: int = 100) -> list[dict]:
+        """返回等待队列中的任务。
+
+        :param offset: 起始偏移
+        :param num: 数量
+        :return: aria2 任务字典列表
+        """
+        result = self._call("aria2.tellWaiting", [offset, num])
+        return result if isinstance(result, list) else []
+
     def tell_status(self, gid: str) -> Optional[dict]:
         """查询任务状态。"""
         result = self._call("aria2.tellStatus", [gid])
