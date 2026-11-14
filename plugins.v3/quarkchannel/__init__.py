@@ -85,7 +85,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.11.2"
+    plugin_version = "0.11.3"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -818,6 +818,9 @@ class QuarkChannel(_PluginBase):
         results: list[TorrentInfo] = []
         for candidate in candidates:
             results.extend(self._results_for_candidate(candidate, mtype))
+        # 可分集的单集条目排在整包前面，方便直接选集
+        # 稳定排序：单集条目在前，整包在后，保持集号顺序不变
+        results.sort(key=lambda item: 0 if "fid=" in (item.enclosure or "") else 1)
         missing = [item for item in candidates if not self._cached_entry(item["sid"])]
         self._submit_prewarm(missing[:PREWARM_COUNT])
         logger.info(
