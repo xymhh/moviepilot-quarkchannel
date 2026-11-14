@@ -241,7 +241,8 @@ def test_status_and_form_expose_expand_in_search():
     plugin._config = {"expand_in_search": True}
     assert plugin.api_status()["data"]["expand_in_search"] is True
     form, defaults = plugin.get_form()
-    assert defaults["expand_in_search"] is False
+    assert defaults["expand_in_search"] is True
+    assert defaults["expand_max_files"] == 0
     assert "expand_in_search" in str(form)
 
 
