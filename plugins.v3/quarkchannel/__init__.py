@@ -48,6 +48,7 @@ from .downloader import (
     STATE_STOPPED,
     TaskFile,
 )
+from .picker import AutoPicker
 from .shares.quark import QuarkShareClient, extract_pwd_id
 from .sources.pansou import PansouSource, normalize_share_url
 from .sources.tgchannel import TgIndex, TgMonitor
@@ -84,7 +85,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.9.0"
+    plugin_version = "0.10.0"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -99,6 +100,7 @@ class QuarkChannel(_PluginBase):
     _channels: Optional[ChannelStore] = None
     _tg_index: Optional[TgIndex] = None
     _tg_monitors: list[TgMonitor] = []
+    _picker: Optional[AutoPicker] = None
     _channel_sources: dict[str, tuple[tuple, PansouSource]] = {}
     _secret: str = ""
     _aria2_secret: str = ""
@@ -113,6 +115,7 @@ class QuarkChannel(_PluginBase):
         self._prewarm_inflight: set[str] = set()
         self._tg_monitors = []
         self._channel_sources = {}
+        self._picker = None
 
     # ---------- 生命周期 ----------
 
@@ -137,6 +140,19 @@ class QuarkChannel(_PluginBase):
             logger.warning(f"渠道迁移失败：{type(error).__name__}")
         if migrated:
             logger.info(f"已从旧配置迁移 {migrated} 个渠道")
+        self._picker = AutoPicker(
+            data_dir=data_dir,
+            cache=self._cache,
+            snapshot_fetcher=self._ensure_entry,
+            torrent_url_builder=self._torrent_url,
+            enabled=bool(config.get("auto_pick_enabled")),
+            dry_run=bool(config.get("auto_pick_dry_run", True)),
+            min_similarity=float(
+                config.get("auto_pick_min_similarity")
+                if config.get("auto_pick_min_similarity") is not None else 0.75
+            ),
+            downloader=str(config.get("auto_pick_downloader") or "网盘直链"),
+        )
         sign_secret = str(config.get("sign_secret") or "").strip()
         aria2_secret = str(config.get("aria2_secret") or "").strip()
         config_changed = False
@@ -196,6 +212,7 @@ class QuarkChannel(_PluginBase):
         if self._manager:
             self._manager.shutdown()
         self._manager = None
+        self._picker = None
         self._enabled = False
 
     def _stop_prewarm(self) -> None:
@@ -275,6 +292,7 @@ class QuarkChannel(_PluginBase):
                     interval_minutes=int(cfg.get("interval_minutes") or 10),
                     backfill=bool(cfg.get("backfill")),
                     index=index,
+                    on_new_entries=self._on_tg_entries,
                 )
                 monitor.start()
                 self._tg_monitors.append(monitor)
@@ -315,6 +333,7 @@ class QuarkChannel(_PluginBase):
                 data_dir, api_id, api_hash, session, channels,
                 scan_limit=scan_limit, interval_minutes=interval,
                 backfill=bool(config.get("tg_backfill")), index=index,
+                on_new_entries=self._on_tg_entries,
             )
             monitor.start()
             self._tg_monitors.append(monitor)
@@ -324,6 +343,19 @@ class QuarkChannel(_PluginBase):
             )
         except Exception as error:  # noqa: BLE001 - 监控失败不影响搜索下载
             logger.warning(f"Telegram 监控启动失败：{type(error).__name__}")
+
+    def _on_tg_entries(self, entries: list[dict]) -> None:
+        """监控发现新条目后交给自动追更决策器。
+
+        :param entries: 本轮新入索引的条目
+        """
+        picker = self._picker
+        if picker is None:
+            return
+        try:
+            picker.process(entries)
+        except Exception as error:  # noqa: BLE001 - 自动追更不能影响监控线程
+            logger.warning(f"自动追更处理新条目失败：{type(error).__name__}")
 
     def _refresh_channel_runtime(self) -> None:
         """渠道变更后重建 pansou 实例与 Telegram 监控。"""
@@ -388,6 +420,13 @@ class QuarkChannel(_PluginBase):
                 "methods": ["POST"],
                 "auth": "bear",
                 "summary": "清理过期分享缓存",
+            },
+            {
+                "path": "/auto_pick",
+                "endpoint": self.api_auto_pick,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "查看最近自动追更决策",
             },
             {
                 "path": "/channels",
@@ -589,7 +628,18 @@ class QuarkChannel(_PluginBase):
                   hint="把最近消息也建入索引"),
         ], subtitle="每个频道各自维护游标，互不影响")
 
-        tg = [tg_switch, tg_account, tg_channels_card]
+        auto_pick = card("自动追更", [
+            field("auto_pick_enabled", "TG 命中即处理", kind="switch", cols=4,
+                  hint="新消息匹配启用订阅后，按媒体库缺集立即提交下载"),
+            field("auto_pick_dry_run", "仅记录不下载", kind="switch", cols=4,
+                  hint="建议先观察一段时间决策记录再关闭"),
+            field("auto_pick_min_similarity", "标题相似度阈值", kind="number", cols=4,
+                  hint="0-1，默认 0.75；越高越严格"),
+            field("auto_pick_downloader", "下载器名称", cols=6,
+                  hint="默认网盘直链；需与 MoviePilot 中的下载器名称一致"),
+        ], subtitle="不依赖订阅总集数，按媒体库已有集计算缺集")
+
+        tg = [tg_switch, tg_account, tg_channels_card, auto_pick]
 
         download = card("下载", [
             field("aria2_enabled", "启用 aria2", kind="switch", cols=4,
@@ -650,6 +700,10 @@ class QuarkChannel(_PluginBase):
             "tg_interval_minutes": 10,
             "tg_scan_limit": 100,
             "tg_backfill": False,
+            "auto_pick_enabled": False,
+            "auto_pick_dry_run": True,
+            "auto_pick_min_similarity": 0.75,
+            "auto_pick_downloader": "网盘直链",
             "aria2_enabled": True,
             "aria2_connections": 64,
             "aria2_split": 64,
@@ -1410,6 +1464,21 @@ class QuarkChannel(_PluginBase):
             },
         }
 
+    def api_auto_pick(self) -> dict:
+        """返回自动追更开关与最近决策记录。"""
+        picker = self._picker
+        picks = picker.recent(50) if picker else []
+        return {
+            "success": True,
+            "data": {
+                "enabled": bool(picker.enabled) if picker else False,
+                "dry_run": bool(picker.dry_run) if picker else True,
+                "processed": picker.store.processed_count() if picker else 0,
+                "picks": picks,
+                "recent": picks,
+            },
+        }
+
     def api_status(self) -> dict:
         """返回运行状态（含盘搜鉴权自检）。"""
         tasks = self._manager.tasks() if self._manager else []
@@ -1426,6 +1495,8 @@ class QuarkChannel(_PluginBase):
                 )
             except (TypeError, ValueError):
                 pass
+        picker = self._picker
+        auto_pick_picks = picker.recent(10) if picker else []
         channel_items = self._channels.list() if self._channels else []
         channel_stats = [
             {
@@ -1446,6 +1517,9 @@ class QuarkChannel(_PluginBase):
                 "pansou_reason": pansou_reason,
                 "tg_entries": tg_entries,
                 "tg_last_poll": tg_last_poll,
+                "auto_pick_enabled": bool(picker.enabled) if picker else False,
+                "auto_pick_dry_run": bool(picker.dry_run) if picker else True,
+                "auto_pick_picks": auto_pick_picks,
                 "channels": len(channel_items),
                 "channel_stats": channel_stats,
                 "channel_last_scan": {

@@ -7,13 +7,14 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import re
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncIterator, Iterable, Optional
+from typing import Any, AsyncIterator, Callable, Iterable, Optional
 
 from app.sdk.logging import logger
 
@@ -213,7 +214,8 @@ class TgMonitor:
     def __init__(self, data_dir: Path, api_id: int, api_hash: str, session: str,
                  channels: list[str], scan_limit: int = 100,
                  interval_minutes: int = 10, backfill: bool = False,
-                 index: Optional[TgIndex] = None) -> None:
+                 index: Optional[TgIndex] = None,
+                 on_new_entries: Optional[Callable[[list[dict]], Any]] = None) -> None:
         """保存凭据与轮询参数；不会在此连接 Telegram。
 
         :param data_dir: 插件数据目录
@@ -225,6 +227,7 @@ class TgMonitor:
         :param interval_minutes: 轮询间隔分钟数
         :param backfill: 首次接入时是否回补最近 scan_limit 条消息
         :param index: 可选的共享索引；多渠道监控共用一份 tg_index.json
+        :param on_new_entries: 可选的新增条目回调，支持同步或异步函数
         """
         self.data_dir = Path(data_dir)
         self.index = index if index is not None else TgIndex(self.data_dir)
@@ -235,6 +238,7 @@ class TgMonitor:
         self.scan_limit = max(1, int(scan_limit or 100))
         self.interval_minutes = max(1, int(interval_minutes or 10))
         self.backfill = bool(backfill)
+        self.on_new_entries = on_new_entries
         self.last_poll = self.index.last_poll
         self._client: Any = None
         self._thread: Optional[threading.Thread] = None
@@ -313,6 +317,7 @@ class TgMonitor:
                             ))
                         if backfilled:
                             self.index.add_entries(backfilled)
+                            await self._notify_new_entries(backfilled)
                         logger.info(
                             f"Telegram 频道 {channel} 回补 {len(recent)} 条消息，"
                             f"入索引 {len(backfilled)} 条"
@@ -361,9 +366,26 @@ class TgMonitor:
                         f"Telegram 频道 {channel} 拉取失败：{type(error).__name__}"
                     )
                     break
+        if added:
+            await self._notify_new_entries(added)
         self.last_poll = time.time()
         self.index.last_poll = self.last_poll
         return added
+
+    async def _notify_new_entries(self, entries: list[dict]) -> None:
+        """调用新增条目回调；回调异常只记录 warning。
+
+        :param entries: 本轮新入索引的条目
+        """
+        callback = self.on_new_entries
+        if callback is None or not entries:
+            return
+        try:
+            result = callback([dict(item) for item in entries])
+            if inspect.isawaitable(result):
+                await result
+        except Exception as error:  # noqa: BLE001 - 回调失败不能影响监控
+            logger.warning(f"Telegram 新条目回调失败：{type(error).__name__}")
 
     @staticmethod
     def extract_sids(text: str) -> list[str]:

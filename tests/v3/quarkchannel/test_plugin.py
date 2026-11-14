@@ -528,3 +528,26 @@ def test_channel_monitors_dedupe_and_share_index(tmp_path: Path, monkeypatch):
     assert [item.channels for item in created] == [["@same"], ["@other"]]
     assert all(item.started for item in created)
     assert all(item.index is plugin._tg_index for item in created)
+
+
+def test_init_configures_auto_picker_and_api(tmp_path: Path):
+    """插件初始化读取自动追更配置，状态与决策接口可正常返回。"""
+    plugin = QuarkChannel()
+    plugin.get_data_path = lambda: tmp_path
+    try:
+        plugin.init_plugin({
+            "enabled": False,
+            "auto_pick_enabled": True,
+            "auto_pick_dry_run": False,
+            "auto_pick_min_similarity": 0.5,
+            "auto_pick_downloader": "测试下载器",
+        })
+        picker = plugin._picker
+        assert picker is not None
+        assert picker.enabled is True and picker.dry_run is False
+        assert picker.matcher.min_similarity == 0.5
+        assert picker.downloader == "测试下载器"
+        assert plugin.api_auto_pick()["data"]["enabled"] is True
+        assert plugin.api_status()["data"]["auto_pick_enabled"] is True
+    finally:
+        plugin.stop_service()

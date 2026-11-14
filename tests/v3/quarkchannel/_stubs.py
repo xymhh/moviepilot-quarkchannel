@@ -99,6 +99,51 @@ class _TorrentInfo:
         self.__dict__.update(kwargs)
 
 
+class _Context:
+    """下载上下文桩。"""
+
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
+class _MediaInfo:
+    """媒体信息桩。"""
+
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
+class _MetaInfo:
+    """识别信息桩。"""
+
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
+class _SubscribeOper:
+    """订阅数据入口桩。"""
+
+    def list(self, state=None):
+        """返回空订阅列表。"""
+        return []
+
+
+class _MediaServerOper:
+    """媒体服务器数据入口桩。"""
+
+    def exists(self, **kwargs):
+        """返回未入库。"""
+        return None
+
+
+class _DownloadChain:
+    """下载链桩。"""
+
+    def download_single(self, *args, **kwargs):
+        """默认不产生下载任务。"""
+        return None
+
+
 class _DownloaderTorrent:
     """下载任务桩。"""
 
@@ -174,8 +219,28 @@ def _install_stubs() -> None:
     domain = _module("app.domain")
     context = _module("app.domain.context")
     context.TorrentInfo = _TorrentInfo
+    context.Context = _Context
+    context.MediaInfo = _MediaInfo
+    context.MetaInfo = _MetaInfo
     domain.context = context
     app.domain = domain
+
+    db = _module("app.db")
+    oper = _module("app.db.oper")
+    subscribe_oper = _module("app.db.oper.subscribe")
+    subscribe_oper.SubscribeOper = _SubscribeOper
+    mediaserver_oper = _module("app.db.oper.mediaserver")
+    mediaserver_oper.MediaServerOper = _MediaServerOper
+    oper.subscribe = subscribe_oper
+    oper.mediaserver = mediaserver_oper
+    app.db = db
+    db.oper = oper
+
+    chain = _module("app.chain")
+    download_chain = _module("app.chain.download")
+    download_chain.DownloadChain = _DownloadChain
+    chain.download = download_chain
+    app.chain = chain
 
     types_module = _module("app.schemas.types")
     types_module.MediaType = _MediaType
