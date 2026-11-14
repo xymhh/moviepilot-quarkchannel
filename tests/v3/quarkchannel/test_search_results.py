@@ -271,3 +271,50 @@ def test_search_cache_writes_when_all_ready():
     rows = plugin.search_torrents(keyword="就绪")
     assert len(rows) == 2
     assert plugin._search_cache_get("就绪|None") is not None
+
+
+# ---------- 搜索结果：渠道切换后缓存失效 ----------
+
+def test_search_does_not_cache_empty_results():
+    """无候选时不写缓存：关掉全部渠道后搜一次，不会把"0 条"冻 10 分钟。"""
+    entry = _entry(
+        "https://pan.quark.cn/s/empty",
+        "空结果剧",
+        [{"name": "Show.S01E01.mkv", "size": 100, "fid": "f1"}],
+        total_size=100,
+    )
+    plugin = _plugin(entry)
+    plugin._pansou = _Pansou([])
+    rows = plugin.search_torrents(keyword="空结果")
+    assert rows == []
+    assert plugin._search_cache_get("空结果|None") is None
+    # 重开渠道后同一关键词立刻能搜到，不再被冻住的空结果挡住
+    plugin._pansou = _Pansou([
+        {"url": entry.share_url, "title": "空结果剧", "source": "pansou"},
+    ])
+    rows = plugin.search_torrents(keyword="空结果")
+    assert len(rows) == 2
+
+
+def test_channel_change_clears_search_cache(monkeypatch):
+    """渠道变更后搜索缓存失效：同一关键词会重新按新渠道搜。"""
+    entry = _entry(
+        "https://pan.quark.cn/s/switch",
+        "切渠道剧",
+        [{"name": "Show.S01E01.mkv", "size": 100, "fid": "f1"}],
+        total_size=100,
+    )
+    plugin = _plugin(entry)
+    rows = plugin.search_torrents(keyword="切渠道")
+    assert len(rows) == 2
+    assert plugin._search_cache_get("切渠道|None") is not None
+    monkeypatch.setattr(plugin, "_stop_tg_monitor", lambda: None)
+    monkeypatch.setattr(plugin, "_start_tg_runtime", lambda: None)
+    plugin._refresh_channel_runtime()
+    assert plugin._search_cache_get("切渠道|None") is None
+    # 换掉盘搜内容后重新搜，拿到的是新结果而不是缓存的旧结果
+    plugin._pansou = _Pansou([
+        {"url": "https://pan.quark.cn/s/other", "title": "新剧", "source": "pansou"},
+    ])
+    rows = plugin.search_torrents(keyword="切渠道")
+    assert [item.title for item in rows] == ["新剧"]

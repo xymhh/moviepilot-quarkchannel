@@ -100,7 +100,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.14.0"
+    plugin_version = "0.14.1"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -376,8 +376,14 @@ class QuarkChannel(_PluginBase):
             logger.warning(f"自动追更处理新条目失败：{type(error).__name__}")
 
     def _refresh_channel_runtime(self) -> None:
-        """渠道变更后重建 pansou 实例与 Telegram 监控。"""
+        """渠道变更后重建 pansou 实例与 Telegram 监控，并清掉搜索结果缓存。
+
+        不清缓存时，开关渠道后搜同一关键词会直接命中 10 分钟内的旧结果，
+        渠道开关看起来"不生效"。
+        """
         self._channel_sources = {}
+        with self._pending_lock:
+            self._search_cache.clear()
         self._stop_tg_monitor()
         self._start_tg_runtime()
 
@@ -873,8 +879,9 @@ class QuarkChannel(_PluginBase):
                 candidates, mtype, base_title=keyword,
                 expand=bool(self._config.get("expand_in_search", EXPAND_IN_SEARCH_DEFAULT)),
             )
-            # 只有全部候选都有快照时才写缓存；否则"只有整包"的结果会被冻 10 分钟
-            if all(self._cached_entry(str(item.get("sid") or "")) is not None for item in candidates):
+            # 只有全部候选都有快照且结果非空时才写缓存；否则"只有整包"的结果会被冻 10 分钟，
+            # 而空结果（例如关掉全部渠道后搜一次）会把"0 条"冻住，重开渠道也搜不到
+            if results and all(self._cached_entry(str(item.get("sid") or "")) is not None for item in candidates):
                 self._search_cache_put(cache_key, results)
         per_page = self._results_per_page()
         start = page * per_page if per_page else 0
