@@ -435,8 +435,20 @@ class DownloadManager:
             directory = str(entry.get("dir") or "")
             if gid and directory:
                 by_dir.setdefault(directory.rstrip("/"), []).append(gid)
+        logger.info(f"aria2 接管探测：active/waiting 目录={list(by_dir.keys())[:3]}")
+        for task in list(self._tasks.values()):
+            logger.info(
+                f"本地任务 {task.title[:16]} state={task.state} gids={len(task.gids)} "
+                f"path={task.content_path}"
+            )
         for task in list(self._tasks.values()):
             if task.gids:
+                with self._lock:
+                    task.state = STATE_DOWNLOADING
+                    if task.hash not in self._stops:
+                        self._stops[task.hash] = threading.Event()
+                        self._pool.submit(self._watch_aria2, task.hash)
+                    self._flush()
                 continue
             gids = by_dir.get(str(task.content_path).rstrip("/"))
             if not gids:
@@ -492,6 +504,8 @@ class DownloadManager:
                 task.done = min(task.total, total_done) if task.total else total_done
                 task.speed = float(total_speed)
                 task.updated_at = time.time()
+                if not all_complete and task.state != STATE_DOWNLOADING:
+                    task.state = STATE_DOWNLOADING
                 if all_complete:
                     task.gids = []
                     task.state = STATE_COMPLETED
@@ -615,6 +629,8 @@ class DownloadManager:
                 task.done = min(task.total, total_done) if task.total else total_done
                 task.speed = float(total_speed)
                 task.updated_at = time.time()
+                if not all_complete and task.state != STATE_DOWNLOADING:
+                    task.state = STATE_DOWNLOADING
                 self._flush()
             if all_complete:
                 with self._lock:

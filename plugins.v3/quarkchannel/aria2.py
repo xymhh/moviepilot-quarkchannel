@@ -131,6 +131,7 @@ class Aria2Launcher:
         :param port: RPC 监听端口
         """
         self.binary = binary
+        self._resolved_binary: Optional[str] = None
         self.port = int(port)
         self.dir_root = str(dir_root or "/downloads")
         self.secret = secret
@@ -139,11 +140,37 @@ class Aria2Launcher:
         self._data_dir = Path(data_dir)
         self._process: Optional[subprocess.Popen] = None
 
+    def _resolve_binary(self) -> str:
+        """在多个候选路径中查找 aria2c 可执行文件。
+
+        :return: 可执行文件路径
+        :raises FileNotFoundError: 所有候选都不存在
+        """
+        import shutil
+
+        candidates = [
+            self.binary,
+            str(self._data_dir / "bin" / "aria2c"),
+            "/config/plugins/CloudSubscribeX/bin/aria2c",
+            "/config/plugins/cloudsubscribex/bin/aria2c",
+            "/usr/local/bin/aria2c",
+            "/usr/bin/aria2c",
+        ]
+        found = shutil.which("aria2c")
+        if found:
+            candidates.append(found)
+        for path in candidates:
+            if path and Path(path).exists():
+                return path
+        raise FileNotFoundError(f"aria2c 不存在，已尝试：{candidates}")
+
     def _command(self) -> list[str]:
         """构造 aria2c 启动参数；密钥只在进程参数中使用。"""
+        if self._resolved_binary is None:
+            self._resolved_binary = self._resolve_binary()
         log_path = self._data_dir / "aria2.log"
         return [
-            self.binary,
+            self._resolved_binary,
             "--enable-rpc",
             "--rpc-listen-all=false",
             f"--rpc-listen-port={self.port}",

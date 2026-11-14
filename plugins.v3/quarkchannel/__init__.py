@@ -85,7 +85,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.10.5"
+    plugin_version = "0.10.6"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -1181,7 +1181,12 @@ class QuarkChannel(_PluginBase):
         for task in self._manager.tasks():
             if wanted is not None and task.hash not in wanted:
                 continue
-            state = self._map_state(task.state)
+            # 有 aria2 gid 且未下完 → 一律按下载中上报，避免重载后误显示暂停
+            state = (
+                "downloading"
+                if getattr(task, "gids", None) and (task.progress or 0) < 100
+                else self._map_state(task.state)
+            )
             if query in {"transfer", "completed"} and state != STATE_COMPLETED:
                 continue
             if query in {"downloading"} and state != STATE_DOWNLOADING:

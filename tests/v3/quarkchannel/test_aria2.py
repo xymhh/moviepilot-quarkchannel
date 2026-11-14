@@ -129,6 +129,7 @@ def test_launcher_reuses_existing_instance(tmp_path, monkeypatch):
 def test_launcher_start_command_contains_required_options(tmp_path, monkeypatch):
     """需要启动时携带 6805 端口、64 线程和全部关键参数。"""
     launcher = Aria2Launcher(tmp_path, "/downloads", "secret", binary="/downloads/aria2c")
+    monkeypatch.setattr(launcher, "_resolve_binary", lambda: "/downloads/aria2c")
     versions = iter([None, {"version": "1.36.0"}])
     monkeypatch.setattr(launcher.rpc, "version", lambda: next(versions, {"version": "1.36.0"}))
     commands = []
