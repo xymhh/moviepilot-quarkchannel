@@ -444,7 +444,7 @@ def test_aria2_success_updates_progress_and_cleans_saved(tmp_path, monkeypatch):
         assert client.delete_calls == [["saved-fid-0", "saved-fid-1"]]
     finally:
         manager.shutdown()
-    assert launcher.stop_calls == 1
+    assert launcher.stop_calls == 0  # 停止时保留 aria2 守护进程
 
 
 def test_aria2_unavailable_falls_back_to_chunks(tmp_path, monkeypatch):

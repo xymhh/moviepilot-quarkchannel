@@ -244,22 +244,16 @@ class DownloadManager:
         return changed
 
     def shutdown(self) -> None:
-        """停止全部任务、移除 aria2 任务并关闭线程池。"""
-        gids: list[str] = []
+        """停止本地线程，但**保留 aria2 任务与守护进程**。
+
+        插件重载/升级很频繁，若在这里杀掉 aria2 或移除任务，
+        正在下载的文件会中断且进度丢失，因此只停止本地轮询。
+        """
         with self._lock:
             for event in self._stops.values():
                 event.set()
-            for task in self._tasks.values():
-                if task.state == STATE_DOWNLOADING:
-                    task.state = STATE_STOPPED
-            for task_gids in self._aria2_gids.values():
-                gids.extend(task_gids)
-            self._aria2_gids.clear()
             self._flush()
-        self._remove_aria2_gids(gids)
         self._pool.shutdown(wait=False, cancel_futures=True)
-        if self._aria2_launcher:
-            self._aria2_launcher.stop()
 
     # ---------- 下载执行 ----------
 
