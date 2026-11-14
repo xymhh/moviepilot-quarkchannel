@@ -91,7 +91,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.13.4"
+    plugin_version = "0.13.5"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -835,7 +835,7 @@ class QuarkChannel(_PluginBase):
         # 否则要等下一轮预热完成才能选单集。
         missing_inline = [
             item for item in candidates
-            if item.get("url") and not self._cached_entry(item.get("sid", ""))
+            if item.get("share_url") and not self._cached_entry(item.get("sid", ""))
         ][:6]
         if missing_inline:
             from concurrent.futures import ThreadPoolExecutor
@@ -843,7 +843,7 @@ class QuarkChannel(_PluginBase):
             pool = ThreadPoolExecutor(max_workers=len(missing_inline))
             futures = [
                 pool.submit(
-                    self._ensure_entry, item["url"],
+                    self._ensure_entry, item["share_url"],
                     item.get("passcode", ""), item.get("title", ""),
                 )
                 for item in missing_inline
@@ -1149,8 +1149,8 @@ class QuarkChannel(_PluginBase):
         for candidate in candidates:
             entry = self._candidate_entry(candidate)
             if not entry:
-                # 拿不到文件清单时保留整包候选（下载时会现场取一次），
-                # 但不展开单集，避免"整包过期、单集却能下"的错配。
+                # 拿不到文件清单（预热失败/分享失效）：保留整包候选，
+                # 下载时会现场再取一次；不展开单集，避免整包与单集错配。
                 per_candidate.append((candidate, None, {}))
                 continue
             by_episode: dict[int, tuple[int, dict]] = {}
@@ -1175,14 +1175,6 @@ class QuarkChannel(_PluginBase):
                 current = best.get(episode)
                 if current is None or size > current[0]:
                     best[episode] = (size, item, candidate)
-
-        # 只要有一个分享拿到了文件清单，就丢掉取不到清单的整包：
-        # 这类多为已失效分享，点下载也只会失败，留在列表里只会误导。
-        if any(entry is not None for _c, entry, _b in per_candidate):
-            dropped = [c for c, entry, _b in per_candidate if entry is None]
-            if dropped:
-                logger.info(f"跳过 {len(dropped)} 个取不到文件清单的分享（多为已失效）")
-            per_candidate = [row for row in per_candidate if row[1] is not None]
 
         limit = self._expand_limit()
         results: list[TorrentInfo] = []

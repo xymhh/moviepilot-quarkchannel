@@ -314,7 +314,8 @@ def test_search_torrents_returns_pansou_whole_without_snapshot(tmp_path, monkeyp
     assert [item.title for item in rows] == ["好资源"]
     assert rows[0].size == 2048.0
     assert rows[0].pri_order == 0
-    assert calls == []
+    # 会尝试取一次清单，失败则退回整包
+    assert len(calls) == 1
 
 
 def test_api_status_reports_tg_index(tmp_path):

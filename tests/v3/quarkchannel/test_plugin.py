@@ -184,8 +184,8 @@ def test_download_retries_after_error_and_rejects_unmatched_episode(tmp_path: Pa
     assert manager.submit_count == 2
 
 
-def test_search_skips_snapshot_and_defers_prewarm(tmp_path: Path, monkeypatch):
-    """搜索链不调用 snapshot，首个候选只交给后台队列预热。"""
+def test_search_prewarms_first_candidates_inline(tmp_path: Path, monkeypatch):
+    """搜索链对前几个候选同步取一次清单，让单集能立即展开。"""
     plugin = QuarkChannel()
     plugin._enabled = True
     plugin._config = {"max_results": 3}
@@ -202,7 +202,8 @@ def test_search_skips_snapshot_and_defers_prewarm(tmp_path: Path, monkeypatch):
         rows = plugin.search_torrents(keyword="快速")
         assert len(rows) == 1
         assert rows[0].size == 512.0
-        assert calls == []
+        # 拿不到清单时退回整包，但仍会尝试过一次
+        assert len(calls) == 1
     finally:
         plugin._stop_prewarm()
 
