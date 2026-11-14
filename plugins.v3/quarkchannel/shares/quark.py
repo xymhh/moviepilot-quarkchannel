@@ -139,17 +139,63 @@ class QuarkShareClient:
             if method == "GET":
                 response = self._request.get_res(
                     url, params=merged, headers=self._headers(user_agent=user_agent),
-                    timeout=timeout,
+                    timeout=timeout, raise_exception=True,
                 )
             else:
                 response = self._request.post_res(
                     url, params=merged, json=payload or {},
                     headers=self._headers(user_agent=user_agent), timeout=timeout,
+                    raise_exception=True,
                 )
-        except Exception as error:  # noqa: BLE001 - 网络异常按失败处理
-            logger.debug(f"夸克接口 {path} 请求异常：{error}")
-            return {}
-        return self._json(response)
+        except Exception as error:  # noqa: BLE001 - 宿主客户端异常时改用独立连接重试
+            logger.warning(
+                f"夸克接口 {path} 请求异常：{type(error).__name__}: {str(error)[:120]}，"
+                f"改用独立连接重试"
+            )
+            try:
+                response = self._session().request(
+                    method.upper(), url, params=merged,
+                    json=payload if method != "GET" else None,
+                    headers=self._headers(user_agent=user_agent),
+                    timeout=(5, timeout),
+                )
+                return self._json(response)
+            except Exception as retry_error:  # noqa: BLE001 - 重试仍失败按失败处理
+                logger.warning(
+                    f"夸克接口 {path} 独立连接重试失败："
+                    f"{type(retry_error).__name__}: {str(retry_error)[:120]}"
+                )
+                return {}
+        payload = self._json(response)
+        status_code = getattr(response, "status_code", None)
+        if status_code == 401:
+            logger.warning(
+                "夸克接口返回 401：夸克 Cookie 已失效或缺少登录态，"
+                "请在插件设置 → 下载 中更新 Cookie"
+            )
+        if not payload:
+            status = getattr(response, "status_code", None)
+            snippet = ""
+            try:
+                snippet = (getattr(response, "text", "") or "")[:120].replace("\n", " ")
+            except Exception:  # noqa: BLE001 - 诊断字段读取失败不影响主流程
+                snippet = ""
+            logger.warning(f"夸克接口 {path} 返回空 JSON：status={status} body={snippet}")
+        return payload
+
+    def _session(self) -> Any:
+        """返回独立的 requests 会话，避免复用宿主连接池。
+
+        :return: requests.Session 实例
+        """
+        session = getattr(self, "_own_session", None)
+        if session is None:
+            import requests
+
+            session = requests.Session()
+            session.trust_env = True
+            self._own_session = session
+        return session
 
     def _proxy_opt(self) -> Optional[dict]:
         """代理参数透传。"""
@@ -379,12 +425,29 @@ class QuarkShareClient:
                 raise ValueError("转存任务超时")
             time.sleep(TASK_POLL_INTERVAL)
 
-    def _match_folder_fids(self, names: list[str]) -> list[str]:
-        """缺少 save_as_top_fids 时，按文件名从转存目录反查 fid。"""
-        available: dict[str, list[str]] = {}
-        for row in self._folder_rows(self._folder_fid or ""):
+    def _walk_files(self, pdir_fid: str, depth: int = 0) -> list[dict]:
+        """递归列出目录下的文件（最多 3 层），返回文件行。
+
+        :param pdir_fid: 起始目录 fid
+        :param depth: 当前深度
+        :return: 文件行列表
+        """
+        if depth > 3:
+            return []
+        files: list[dict] = []
+        for row in self._folder_rows(pdir_fid):
             if bool(row.get("dir")):
+                child = str(row.get("fid") or "")
+                if child:
+                    files.extend(self._walk_files(child, depth + 1))
                 continue
+            files.append(row)
+        return files
+
+    def _match_folder_fids(self, names: list[str]) -> list[str]:
+        """按文件名从转存目录递归反查文件 fid（跳过目录）。"""
+        available: dict[str, list[str]] = {}
+        for row in self._walk_files(self._folder_fid or ""):
             name = str(row.get("file_name") or "")
             fid = str(row.get("fid") or "")
             if name and fid:
@@ -499,11 +562,10 @@ class QuarkShareClient:
         url = ""
         used_ua = CLIENT_UA
         attempts: list[tuple[str, str, dict, str, bool]] = (
-            # 与生产可用实现完全一致的通道顺序：先 PC 域名且不带公共参数，
-            # 再造客户端参数走 share 域名，最后退回网页 UA。
-            ("drive-pc/PC-UA", HOST_PC, {}, CLIENT_UA, False),
-            ("drive/PC-UA", HOST_SAVE, dict(CLIENT_PARAMS), CLIENT_UA, False),
-            ("drive/网页-UA", HOST_SAVE, dict(CLIENT_PARAMS), PC_UA, False),
+            # 取直链统一走 drive-pc，并保留 pr/fr 公共参数：
+            # 缺这两个参数时夸克会按未登录处理直接返回 401。
+            ("drive-pc/客户端-UA", HOST_PC, {}, CLIENT_UA, True),
+            ("drive-pc/网页-UA", HOST_PC, {}, PC_UA, True),
         )
         for attempt in range(max(1, retries)):
             for channel, host, params, candidate_ua, merge_common in attempts:
@@ -535,6 +597,15 @@ class QuarkShareClient:
                     logger.info(f"转存 fid 暂不可用，改用目录中的新 fid：{refreshed}")
                     fid = refreshed
         if not url:
+            # 传进来的可能是目录 fid：展开成文件后重试一次
+            children = []
+            try:
+                children = [str(row.get("fid") or "") for row in self._walk_files(fid) if row.get("fid")]
+            except Exception:  # noqa: BLE001 - 展开失败按原错误返回
+                children = []
+            if children:
+                logger.info(f"取链 fid 为目录，改用其中 {len(children)} 个文件的第一个")
+                return self.download_url_by_fid(children[0], name=name, retries=1)
             message = str(data.get("message") or "")
             raise ValueError(f"夸克未返回下载地址：{message or '未知原因'}")
         headers = {
