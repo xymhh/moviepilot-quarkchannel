@@ -91,7 +91,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.13.1"
+    plugin_version = "0.13.2"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -1139,14 +1139,17 @@ class QuarkChannel(_PluginBase):
     def _expanded_results(self, candidates: list[dict],
                            mtype: Optional[MediaType],
                            base_title: str = "") -> list[TorrentInfo]:
-        """把候选按集号合并展开：同一集保留体积最大的版本，集数完整不重复。"""
-        merged: dict[int, tuple[float, dict, dict]] = {}
-        packs: list[TorrentInfo] = []
-        pack_entries_by_candidate: dict[int, Tuple[dict, ShareEntry]] = {}
+        """按分享分组输出：先整包，紧跟该分享胜出的单集。
+
+        - 整包与它下面的单集一定来自同一个分享，避免"整包已过期、单集却能下"的错觉；
+        - 同一集号在多个分享里出现时，只保留体积最大的版本，并归到那个分享的分组里。
+        """
+        per_candidate: list[Tuple[dict, Optional[ShareEntry], dict[int, tuple[int, dict]]]] = []
+        best: dict[int, tuple[int, dict, dict]] = {}
         for candidate in candidates:
             entry = self._candidate_entry(candidate)
             if not entry:
-                packs.append(self._whole_candidate(candidate, None, mtype))
+                per_candidate.append((candidate, None, {}))
                 continue
             by_episode: dict[int, tuple[int, dict]] = {}
             for item in entry.files:
@@ -1158,7 +1161,6 @@ class QuarkChannel(_PluginBase):
                     continue
                 file_name = str(item.get("name") or "")
                 if not file_name.lower().endswith(VIDEO_SUFFIXES):
-                    # 压缩包/字幕/图片等非视频文件不参与按集展开
                     continue
                 episode = self._episode_of(file_name)
                 if episode is None:
@@ -1166,34 +1168,44 @@ class QuarkChannel(_PluginBase):
                 existing = by_episode.get(episode)
                 if existing is None or size > existing[0]:
                     by_episode[episode] = (size, item)
-            if not by_episode:
-                packs.append(self._whole_candidate(candidate, entry, mtype))
-                continue
-            # 整包始终保留（可选整包），同时展开出单集（可选单集）
-            pack_entries_by_candidate[id(candidate)] = (candidate, entry)
+            per_candidate.append((candidate, entry, by_episode))
             for episode, (size, item) in by_episode.items():
-                current = merged.get(episode)
+                current = best.get(episode)
                 if current is None or size > current[0]:
-                    merged[episode] = (size, item, candidate)
-        results: list[TorrentInfo] = []
+                    best[episode] = (size, item, candidate)
+
         limit = self._expand_limit()
-        # 先按分享输出「整包」，紧跟该分享展开出的单集
-        for candidate, entry in pack_entries_by_candidate.values():
+        results: list[TorrentInfo] = []
+        shown = 0
+        for candidate, entry, by_episode in per_candidate:
+            # 有单集可展开时整包与单集同优先级；纯整包沿用渠道优先级
+            pack_pri = (
+                int(candidate.get("expand_pri") or candidate.get("pri_order") or 0)
+                if by_episode
+                else int(candidate.get("pri_order") or 0)
+            )
             results.append(self._whole_candidate(
-                candidate, entry, mtype,
-                pri_order=int(candidate.get("expand_pri") or candidate.get("pri_order") or 0),
+                candidate, entry, mtype, pri_order=pack_pri,
             ))
-        for episode, (size, item, candidate) in sorted(merged.items())[:limit or None]:
-            file_name = str(item.get("name") or "file")
-            share_title = str(candidate.get("title") or "").strip()
-            display = (str(base_title).strip() or self._clean_title(share_title))[:80]
-            title = f"{display} {self._episode_label(file_name, episode)}".strip()
-            results.append(self._make_torrent(
-                candidate, title, size, int(candidate.get("expand_pri") or 5),
-                str(item.get("fid") or ""), mtype,
-                f"第{episode}集 · {file_name}",
-            ))
-        results.extend(packs)
+            if limit and shown >= limit:
+                continue
+            for episode in sorted(by_episode):
+                if limit and shown >= limit:
+                    break
+                owner = best.get(episode)
+                if owner is None or owner[2] is not candidate:
+                    # 该集在别的分享里有更大的版本，交给那个分享输出
+                    continue
+                size, item = by_episode[episode]
+                file_name = str(item.get("name") or "file")
+                share_title = str(candidate.get("title") or "").strip()
+                display = (str(base_title).strip() or self._clean_title(share_title))[:80]
+                title = f"{display} {self._episode_label(file_name, episode)}".strip()
+                results.append(self._make_torrent(
+                    candidate, title, size, int(candidate.get("expand_pri") or 5),
+                    str(item.get("fid") or ""), mtype, f"第{episode}集 · {file_name}",
+                ))
+                shown += 1
         return results
 
     def _results_per_page(self) -> int:
@@ -1221,19 +1233,6 @@ class QuarkChannel(_PluginBase):
             self._search_cache[key] = (time.time(), rows)
             while len(self._search_cache) > 20:
                 self._search_cache.pop(next(iter(self._search_cache)))
-
-    @staticmethod
-    def _clean_title(text: str) -> str:
-        """仅去掉明显的发布标记，保留片名与画质信息。
-
-        :param text: 原始分享标题
-        :return: 精简后的标题
-        """
-        raw = str(text or "")
-        raw = re.sub(r"(?:名称[:：]\s*)", "", raw)
-        raw = re.sub(r"[#＃]\S+", " ", raw)
-        raw = " ".join(raw.split())
-        return raw[:100] or "video"
 
     def _expand_limit(self) -> int:
         """单次搜索最多展开多少集；0 表示不限制（默认完整展开）。"""
