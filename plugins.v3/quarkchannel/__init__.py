@@ -85,7 +85,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.10.3"
+    plugin_version = "0.10.4"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -1541,10 +1541,10 @@ class QuarkChannel(_PluginBase):
         }
 
     def api_linkdiag(self, payload: Optional[dict] = None) -> dict:
-        """对比同一夸克直链在 python 与 aria2 下的响应状态。
+        """取链后立刻用 Range 请求探测直链状态（快速排障）。
 
         :param payload: {"share_url": "...", "passcode": "", "file_index": 0}
-        :return: 两步结果
+        :return: 各步骤结果
         """
         payload = payload or {}
         share_url = str(payload.get("share_url") or "").strip()
@@ -1552,119 +1552,37 @@ class QuarkChannel(_PluginBase):
         index = int(payload.get("file_index") or 0)
         client = self._make_client()
         pwd_id = extract_pwd_id(share_url)
-        token = client.stoken(pwd_id, passcode)
-        if not token:
-            return {"success": False, "message": "分享不可用"}
-        snapshot = client.snapshot(share_url, passcode, token=token)
-        if not snapshot.files:
-            return {"success": False, "message": "分享内没有文件"}
-        target = snapshot.files[min(index, len(snapshot.files) - 1)]
-        saved = client.save_files(pwd_id, token, [target])
-        if not saved:
-            return {"success": False, "message": "转存失败"}
         try:
-            url, headers = client.download_url_by_fid(saved[0])
+            token = client.stoken(pwd_id, passcode)
+            if not token:
+                return {"success": False, "message": "分享不可用"}
+            snapshot = client.snapshot(share_url, passcode, token=token)
+            files = [item for item in snapshot.files if not item.is_dir]
+            if not files:
+                return {"success": False, "message": "分享内没有文件"}
+            target = files[min(index, len(files) - 1)]
+            saved = client.save_files(pwd_id, token, [target])
+            if not saved:
+                return {"success": False, "message": "转存未返回 fid"}
+            url, headers = client.download_url_by_fid(saved[0], name=target.name)
             from app.sdk.network import RequestUtils as _Req
-            probe = _Req().get_res(url, headers={**headers, "Range": "bytes=0-1023"}, timeout=30)
-            python_status = getattr(probe, "status_code", None)
-            variants = {}
-            try:
-                import requests as _rq
-                base = {
-                    "UA": {"User-Agent": headers.get("User-Agent", "")},
-                    "UA+Ref": {"User-Agent": headers.get("User-Agent", ""),
-                               "Referer": headers.get("Referer", "")},
-                    "UA+Ref+Cookie": {"User-Agent": headers.get("User-Agent", ""),
-                                      "Referer": headers.get("Referer", ""),
-                                      "Cookie": headers.get("Cookie", "")},
-                    "UA+Ref+Cookie+Range": {"User-Agent": headers.get("User-Agent", ""),
-                                            "Referer": headers.get("Referer", ""),
-                                            "Cookie": headers.get("Cookie", ""),
-                                            "Range": "bytes=0-1023"},
-                    "UA+ShareRef": {"User-Agent": headers.get("User-Agent", ""),
-                                    "Referer": share_url},
-                    "UA+Identity": {"User-Agent": headers.get("User-Agent", ""),
-                                    "Referer": headers.get("Referer", ""),
-                                    "Cookie": headers.get("Cookie", ""),
-                                    "Accept": "*/*",
-                                    "Accept-Encoding": "identity"},
-                }
-                for name, hdrs in base.items():
-                    try:
-                        vr = _rq.get(url, headers=hdrs, timeout=15, stream=True)
-                        variants[name] = vr.status_code
-                        vr.close()
-                    except Exception as verr:  # noqa: BLE001 - 诊断用
-                        variants[name] = type(verr).__name__
-            except Exception:  # noqa: BLE001 - 诊断失败不影响结果
-                variants = {}
-            body = getattr(probe, "content", b"") or b""
-            try:
-                body_text = body.decode("utf-8", "ignore")[:200]
-            except Exception:  # noqa: BLE001 - 排障输出不允许中断
-                body_text = ""
-            result = {
-                "success": True,
-                "python": {"status": python_status, "bytes": len(body), "body": body_text},
-                "headers": sorted(headers.keys()),
+            probe = _Req().get_res(
+                url, headers={**headers, "Range": "bytes=0-1023"}, timeout=20,
+            )
+            status = getattr(probe, "status_code", None)
+            return {
+                "success": status in (200, 206),
                 "file": {"name": target.name, "size": target.size},
-                "aria2": self._aria2_variants(url, headers),
-                "variants": variants,
-                "url_head": url[:160],
+                "link": {"status": status, "host": url.split("/")[2]},
+                "headers": sorted(headers.keys()),
             }
+        except Exception as error:  # noqa: BLE001 - 排障接口返回真实原因
+            return {"success": False, "message": f"{type(error).__name__}: {error}"[:300]}
         finally:
-            client.delete_files(saved)
-        return result
-
-    def _aria2_variants(self, url: str, headers: dict) -> list[dict]:
-        """用不同请求头组合让 aria2 试下载几秒，返回各自的状态。
-
-        :param url: 夸克直链
-        :param headers: 取链时使用的请求头
-        :return: [{variant, status, error}]
-        """
-        launcher = self._manager._aria2_launcher if self._manager else None
-        if launcher is None or not launcher.ensure():
-            return [{"variant": "none", "error": "aria2 不可用"}]
-        rpc = launcher.rpc
-        variants = {
-            "ua+referer": {
-                "user-agent": headers.get("User-Agent", ""),
-                "referer": headers.get("Referer", ""),
-            },
-            "ua+referer+cookie": {
-                "user-agent": headers.get("User-Agent", ""),
-                "referer": headers.get("Referer", ""),
-                "header": [f"Cookie: {headers.get('Cookie', '')}"] if headers.get("Cookie") else [],
-            },
-            "no-header": {},
-        }
-        results: list[dict] = []
-        for name, extra in variants.items():
-            options = {
-                "dir": "/tmp",
-                "out": f"diag-{name}",
-                "split": "4",
-                "max-connection-per-server": "4",
-                "min-split-size": "1M",
-                "continue": "false",
-                "auto-file-renaming": "true",
-            }
-            options.update(extra)
-            gid = rpc.add_uri(url, options)
-            if not gid:
-                results.append({"variant": name, "error": "addUri 失败"})
-                continue
-            time.sleep(3)
-            status = rpc.tell_status(gid) or {}
-            results.append({
-                "variant": name,
-                "status": status.get("status"),
-                "error": str(status.get("errorMessage") or "")[:120],
-                "done": status.get("completedLength"),
-            })
-            rpc.remove(gid)
-        return results
+            try:
+                client.delete_files(saved)  # type: ignore[name-defined]
+            except Exception:  # noqa: BLE001 - 清理失败忽略
+                pass
 
     def api_selftest(self, payload: Optional[dict] = None) -> dict:
         """按真实链路自检一条分享：快照 → 转存 → 取链，不下正文。
@@ -1802,7 +1720,23 @@ class QuarkChannel(_PluginBase):
         return QuarkShareClient(
             str(self._config.get("quark_cookie") or ""),
             keep_saved=bool(self._config.get("keep_saved")),
+            on_cookie_refresh=self._save_refreshed_cookie,
         )
+
+    def _save_refreshed_cookie(self, cookie: str) -> None:
+        """把夸克自动刷新的 Cookie 回写插件配置。
+
+        :param cookie: 刷新后的 Cookie
+        """
+        if not cookie or cookie == self._config.get("quark_cookie"):
+            return
+        config = dict(self._config or {})
+        config["quark_cookie"] = cookie
+        self._config = config
+        try:
+            self.update_config(config)
+        except Exception as error:  # noqa: BLE001 - 回写失败不影响下载
+            logger.warning(f"回写夸克 Cookie 失败：{type(error).__name__}")
 
     def _download_root(self) -> str:
         """下载根目录。"""

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from app.sdk.logging import logger
 from app.sdk.network import RequestUtils
@@ -76,7 +76,8 @@ class ShareSnapshot:
 class QuarkShareClient:
     """夸克分享读取与取链。"""
 
-    def __init__(self, cookie: str = "", proxy: bool = False, keep_saved: bool = False) -> None:
+    def __init__(self, cookie: str = "", proxy: bool = False, keep_saved: bool = False,
+                 on_cookie_refresh: Optional[Callable[[str], None]] = None) -> None:
         """保存凭据、代理开关与副本保留策略。
 
         :param cookie: 可选，带上自己的账号 cookie 可降低匿名请求被限的概率
@@ -84,6 +85,7 @@ class QuarkShareClient:
         :param keep_saved: 下载完成后是否保留转存到网盘的副本
         """
         self._cookie = (cookie or "").strip()
+        self._on_cookie_refresh = on_cookie_refresh
         self._proxy = proxy
         self.keep_saved = bool(keep_saved)
         self._folder_fid: Optional[str] = None
@@ -168,6 +170,7 @@ class QuarkShareClient:
                     f"{type(retry_error).__name__}: {str(retry_error)[:120]}"
                 )
                 return {}
+        self._refresh_cookie(response)
         payload = self._json(response)
         status_code = getattr(response, "status_code", None)
         if status_code == 401:
@@ -184,6 +187,40 @@ class QuarkShareClient:
                 snippet = ""
             logger.warning(f"夸克接口 {path} 返回空 JSON：status={status} body={snippet}")
         return payload
+
+    def _refresh_cookie(self, response: Any) -> None:
+        """按响应的 Set-Cookie 刷新 __puus，保持会话有效。
+
+        :param response: 宿主/独立客户端返回的响应对象
+        """
+        try:
+            raw = getattr(response, "headers", {}) or {}
+            values = raw.get("Set-Cookie") or raw.get("set-cookie") or []
+            if isinstance(values, str):
+                values = [values]
+            for item in values:
+                if not str(item).startswith("__puus"):
+                    continue
+                pair = str(item).split(";")[0]
+                parts = [seg.strip() for seg in self._cookie.split(";") if seg.strip()]
+                replaced = False
+                for index, seg in enumerate(parts):
+                    if seg.startswith("__puus="):
+                        parts[index] = pair
+                        replaced = True
+                        break
+                if not replaced:
+                    parts.append(pair)
+                self._cookie = "; ".join(parts)
+                if self._on_cookie_refresh:
+                    try:
+                        self._on_cookie_refresh(self._cookie)
+                    except Exception:  # noqa: BLE001 - 回写失败不影响请求
+                        pass
+                logger.info("夸克 Cookie 已按 Set-Cookie 刷新 __puus")
+                break
+        except Exception:  # noqa: BLE001 - 刷新失败不影响主流程
+            return
 
     def mark_risk(self) -> None:
         """记录一次 412 风控命中；连续 3 次进入 30 分钟冷却。"""
@@ -575,10 +612,10 @@ class QuarkShareClient:
         url = ""
         used_ua = CLIENT_UA
         attempts: list[tuple[str, str, dict, str, bool]] = (
-            # 取直链统一走 drive-pc，并保留 pr/fr 公共参数：
-            # 缺这两个参数时夸克会按未登录处理直接返回 401。
-            ("drive-pc/客户端-UA", HOST_PC, {}, CLIENT_UA, True),
-            ("drive-pc/网页-UA", HOST_PC, {}, PC_UA, True),
+            # 先用不带公共参数的形态（历史可用形态），失败再带 pr/fr。
+            ("drive-pc/客户端-UA", HOST_PC, {}, CLIENT_UA, False),
+            ("drive-pc/客户端-UA+参数", HOST_PC, {}, CLIENT_UA, True),
+            ("drive-pc/网页-UA+参数", HOST_PC, {}, PC_UA, True),
         )
         for attempt in range(max(1, retries)):
             for channel, host, params, candidate_ua, merge_common in attempts:
