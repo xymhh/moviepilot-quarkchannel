@@ -37,22 +37,28 @@ def encode(value: Any) -> bytes:
 
 
 def info_dict(name: str, files: list[dict], piece_length: int = 262144,
-              max_pieces_bytes: int = 1024 * 1024) -> dict:
+              max_pieces_bytes: int = 4 * 1024 * 1024) -> dict:
     """构造种子 info 字典。
+
+    pieces 长度必须等于 ceil(总大小 / piece length) * 20，
+    否则生成的种子是非法的（部分客户端会直接判定无法下载）。
+    文件很大时自动放大 piece length，保证 pieces 不超上限。
 
     :param name: 种子名（MoviePilot 会把它当作下载目录名）
     :param files: 文件清单，每项包含 length 与 path（相对路径字符串列表）
-    :param piece_length: 分片长度，仅影响 hash 稳定性，不参与实际分片
-    :param max_pieces_bytes: pieces 字段体积上限，避免超大分享占用内存
+    :param piece_length: 初始分片长度
+    :param max_pieces_bytes: pieces 字段体积上限
     :return: info 字典
     """
     total = sum(int(item["length"]) for item in files) or 1
-    piece_count = max(1, (total + piece_length - 1) // piece_length)
-    pieces_bytes = min(piece_count * 20, max_pieces_bytes)
+    length = max(16384, int(piece_length))
+    while (total + length - 1) // length * 20 > max_pieces_bytes:
+        length *= 2
+    piece_count = max(1, (total + length - 1) // length)
     return {
         "name": name,
-        "piece length": piece_length,
-        "pieces": b"\x00" * pieces_bytes,
+        "piece length": length,
+        "pieces": b"\x00" * (piece_count * 20),
         "files": [
             {"length": int(item["length"]), "path": list(item["path"])}
             for item in files
