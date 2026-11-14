@@ -1,13 +1,11 @@
 <template>
   <div class="qc-page">
-    <template>
     <v-tabs v-model="tab" density="compact" class="mb-2">
       <v-tab value="channels">渠道</v-tab>
       <v-tab value="search">搜索下载</v-tab>
     </v-tabs>
 
-    <v-window v-model="tab">
-    <v-window-item value="channels">
+    <div v-if="tab === 'channels'">
     <v-row dense class="mb-2">
       <v-col cols="6" sm="3">
         <v-chip size="small" variant="tonal" color="primary" prepend-icon="mdi-rss">
@@ -160,9 +158,9 @@
       </div>
       <v-btn color="primary" size="small" prepend-icon="mdi-plus" @click="openCreate">新增渠道</v-btn>
     </v-card>
-    </v-window-item>
+    </div>
 
-    <v-window-item value="search">
+    <div v-else-if="tab === 'search'">
       <v-row dense align="center" class="mb-2">
         <v-col cols="12" md="9">
           <v-text-field
@@ -253,8 +251,7 @@
           一个分享只显示一条，点「选集」再勾选需要的集
         </div>
       </v-card>
-    </v-window-item>
-    </v-window>
+    </div>
 
     <v-navigation-drawer
       v-if="detail"
@@ -537,7 +534,6 @@
     <v-snackbar v-model="snack.show" :timeout="3000" :color="snack.color" location="bottom">
       {{ snack.text }}
     </v-snackbar>
-    </template>
   </div>
 </template>
 

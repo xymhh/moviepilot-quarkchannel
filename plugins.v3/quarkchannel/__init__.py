@@ -87,7 +87,7 @@ class QuarkChannel(_PluginBase):
     plugin_name = "网盘直链频道"
     plugin_desc = "把夸克分享链接转成 MoviePilot 原生资源，并下载到本地目录。"
     plugin_icon = "QuarkChannel.png"
-    plugin_version = "0.12.0"
+    plugin_version = "0.12.1"
     plugin_author = "xymhh"
     author_url = "https://github.com/xymhh"
     plugin_config_prefix = "quarkchannel_"
@@ -946,7 +946,9 @@ class QuarkChannel(_PluginBase):
             return
         seen.add(sid)
         lowered = str(item.get("title") or "").lower()
-        if re.search(r"\.(?:epub|txt|pdf|mobi|azw3|docx?|zip|rar|7z)\b", lowered):
+        if re.search(r"\.(?:epub|txt|pdf|mobi|azw3|docx?|zip|rar|7z)\b", lowered) or re.search(
+            r"(?:txt\s*全文|epub|电子书|mobi|azw3|小说|漫画|txt版)", lowered
+        ):
             # 电子书/压缩包不是视频资源，直接跳过
             return
         label = str(item.get("channel") or site_name) if is_tg else site_name
