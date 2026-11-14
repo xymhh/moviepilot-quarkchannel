@@ -718,7 +718,7 @@ onMounted(async () => {
 
 <style scoped>
 .qc-page {
-  padding-bottom: 8px;
+  padding: 14px 16px 28px;
 }
 
 .qc-toolbar {
@@ -731,7 +731,7 @@ onMounted(async () => {
 
 @media (max-width: 599px) {
   .qc-page {
-    padding-bottom: calc(96px + env(safe-area-inset-bottom, 0px));
+    padding: 12px 12px calc(104px + env(safe-area-inset-bottom, 0px));
   }
 
   .qc-toolbar {

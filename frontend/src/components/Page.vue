@@ -155,7 +155,13 @@ onMounted(async () => {
 
 <style scoped>
 .qc-detail {
-  padding: 4px 0 8px;
+  padding: 14px 16px 28px;
+}
+
+@media (max-width: 599px) {
+  .qc-detail {
+    padding: 12px 14px 96px;
+  }
 }
 
 .qc-fab {
